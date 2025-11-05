@@ -10,20 +10,38 @@
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     
     <style>
-        /* ページのレイアウト設定 */
-        body { font-family: sans-serif; display: grid; 
-               grid-template-columns: 2fr 1fr; /* 左: 2, 右: 1 の比率 */
-               grid-template-rows: auto 1fr 1fr; 
-               height: 95vh; gap: 10px; padding: 10px; }
-        h1 { grid-column: 1 / -1; margin: 0; } /* 全幅 */
-        #status-display { 
-            grid-column: 1 / -1; /* 全幅 */
-            text-align: center; font-size: 2em; font-weight: bold; 
-            padding: 10px; border: 1px solid #ccc; border-radius: 5px; 
+        /* ★★★ レイアウト修正 (GridSpec風) ★★★ */
+        body { 
+            font-family: sans-serif; 
+            display: grid; 
+            /* 3行 x 2列 (左:時系列(幅1.5), 右:軌跡(幅1)) */
+            grid-template-columns: 1.5fr 1fr;
+            grid-template-rows: auto auto 1fr 1fr 1fr; /* ヘッダー2行 + グラフ3行 */
+            height: 95vh; 
+            gap: 10px; 
+            padding: 10px; 
         }
+        h1 { grid-column: 1 / -1; grid-row: 1; margin: 0; } /* 全幅 (1行目) */
+        #status-display { 
+            grid-column: 1 / -1; /* 全幅 (2行目) */
+            grid-row: 2;
+            text-align: center; font-size: 1.5em; font-weight: bold; 
+            padding: 5px; border: 1px solid #ccc; border-radius: 5px; 
+        }
+        
+        /* --- グラフの配置 --- */
+        /* 左列 */
+        #lat-chart-container { grid-row: 3; grid-column: 1; }
+        #lon-chart-container { grid-row: 4; grid-column: 1; }
+        #ns-chart-container  { grid-row: 5; grid-column: 1; }
+        
+        /* 右列 (3行目から3行分を結合) */
+        #track-chart-container { 
+            grid-row: 3 / span 3; 
+            grid-column: 2;
+        }
+
         .chart-container { position: relative; height: 100%; width: 100%; }
-        /* 軌跡グラフ(右側)は縦に2スパン使う */
-        #track-chart-container { grid-row: 2 / span 2; } 
     </style>
 </head>
 <body>
@@ -33,25 +51,21 @@
     <div id="status-display">ステータス: 接続中...</div>
 
     <div class="chart-container" id="lat-chart-container"><canvas id="latChart"></canvas></div>
-    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
     <div class="chart-container" id="lon-chart-container"><canvas id="lonChart"></canvas></div>
     <div class="chart-container" id="ns-chart-container"><canvas id="nsChart"></canvas></div>
+    
+    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
 
     <script>
         // --- 1. MQTT接続設定 ---
-        // ★ ラズパイ(streamer.py)と設定を合わせる ★
-        const MQTT_BROKER = "ws://test.mosquitto.org:8081"; // ★ ws:// とポート 8081 を使用
-        const MQTT_TOPIC = "gnss/raspi/sbf-rtk"; 
+        const MQTT_BROKER = "ws://test.mosquitto.org:9001"; // ws:// とポート 8081
+        const MQTT_TOPIC = "gnss/raspi/sbf-rtk"; // ラズパイ(streamer.py)と合わせる
 
-        const MAX_POINTS = 200; // グラフに表示する最大点数
+        const MAX_POINTS = 200;
         
-        // 測位ステータス(Q)のマッピング
         const STATUS_MAP = {
-            "1": "FIX (高精度)",
-            "2": "FLOAT (準高精度)",
-            "5": "SINGLE (単独)",
-            "0": "---",
-            "6": "PPP"
+            "1": "FIX (高精度)", "2": "FLOAT (準高精度)", "5": "SINGLE (単独)",
+            "0": "---", "6": "PPP"
         };
 
         const statusDisplay = document.getElementById('status-display');
@@ -64,34 +78,28 @@
                 type: 'line',
                 data: {
                     datasets: [{
-                        label: yLabel,
-                        data: [], // データは空で初期化
+                        label: yLabel, data: [],
                         borderColor: (yLabel.includes('緯度') ? 'blue' : (yLabel.includes('経度') ? 'orange' : 'gray')),
-                        borderWidth: 1.5,
-                        pointRadius: 2,
-                        tension: 0.1
+                        borderWidth: 1.5, pointRadius: 2, tension: 0.1
                     }]
                 },
                 options: {
-                    animation: false, // リアルタイム描画のため軽量化
+                    animation: false,
                     scales: {
                         x: {
-                            type: 'time', // X軸は時間
-                            time: {
-                                unit: 'second',
-                                displayFormats: { second: 'HH:mm:ss' } // 時:分:秒
-                            },
+                            type: 'time',
+                            time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
                             ticks: { maxRotation: 45, minRotation: 45 }
                         },
                         y: {
                             title: { display: true, text: yLabel },
                             ticks: { 
-                                // 緯度経度の場合は小数点以下6桁まで表示
                                 format: (yLabel.includes('緯度') || yLabel.includes('経度')) ? { precision: 6 } : {}
                             }
                         }
                     },
-                    plugins: { legend: { display: false } }
+                    plugins: { legend: { display: false } },
+                    maintainAspectRatio: false // コンテナサイズに合わせる
                 }
             });
         }
@@ -99,15 +107,12 @@
         // 軌跡グラフ (X=Lon, Y=Lat)
         const trackCtx = document.getElementById('trackChart').getContext('2d');
         const trackChart = new Chart(trackCtx, {
-            type: 'scatter', // 軌跡なので散布図
+            type: 'scatter',
             data: {
                 datasets: [{
-                    label: '軌跡',
-                    data: [],
-                    borderColor: 'green',
-                    backgroundColor: 'green',
-                    showLine: true, // 線で結ぶ
-                    tension: 0.1
+                    label: '軌跡', data: [],
+                    borderColor: 'green', backgroundColor: 'green',
+                    showLine: true, tension: 0.1
                 }]
             },
             options: {
@@ -116,8 +121,9 @@
                     x: { title: { display: true, text: '経度 (Lon)' }, ticks: { format: { precision: 6 } } },
                     y: { title: { display: true, text: '緯度 (Lat)' }, ticks: { format: { precision: 6 } } }
                 },
-                aspectRatio: 1, // 緯度経度の縮尺を合わせる
-                plugins: { legend: { display: false } }
+                aspectRatio: 1, // 縮尺を合わせる
+                plugins: { legend: { display: false } },
+                maintainAspectRatio: false
             }
         });
 
@@ -128,45 +134,30 @@
         // --- 3. グラフデータ更新用関数 ---
         function addDataToChart(chart, timestamp, value) {
             const data = chart.data.datasets[0].data;
-            if (data.length >= MAX_POINTS) {
-                data.shift(); // 古いデータを削除
-            }
+            if (data.length >= MAX_POINTS) data.shift();
             data.push({ x: timestamp, y: value });
-            chart.update('quiet'); // アニメーションなしで更新
+            chart.update('quiet');
         }
         
         function addTrackData(lon, lat) {
             const data = trackChart.data.datasets[0].data;
-            if (data.length >= MAX_POINTS) {
-                data.shift();
-            }
+            if (data.length >= MAX_POINTS) data.shift();
             data.push({ x: lon, y: lat });
             trackChart.update('quiet');
         }
 
-
         // --- 4. MQTTクライアントのセットアップ ---
-        console.log(`MQTTブローカー (${MQTT_BROKER}) に接続します...`);
         const client = mqtt.connect(MQTT_BROKER);
 
         client.on('connect', () => {
-            console.log('MQTTブローカーに接続しました。');
             statusDisplay.textContent = "MQTT接続完了。データ待機中...";
             statusDisplay.style.color = "orange";
-            
             client.subscribe(MQTT_TOPIC, (err) => {
-                if (err) {
-                    console.error('購読失敗:', err);
-                    statusDisplay.textContent = "トピック購読失敗";
-                    statusDisplay.style.color = "red";
-                } else {
-                    console.log(`トピック '${MQTT_TOPIC}' の購読を開始しました。`);
-                }
+                if (err) statusDisplay.textContent = "トピック購読失敗";
             });
         });
 
         client.on('error', (err) => {
-            console.error('MQTT接続エラー:', err);
             statusDisplay.textContent = "MQTT接続エラー";
             statusDisplay.style.color = "red";
         });
@@ -175,15 +166,12 @@
         client.on('message', (topic, payload) => {
             try {
                 const line = payload.toString().trim();
-                const parts = line.split(/\s+/); // 複数のスペースで分割
+                const parts = line.split(/\s+/); 
                 
-                if (parts.length < 7 || parts[0].startsWith('%')) {
-                    return; // ヘッダーや不正なデータを無視
-                }
+                if (parts.length < 7 || parts[0].startsWith('%')) return;
                 
-                // YYYY/MM/DD HH:MM:SS.sss
                 const timestr = parts[0] + " " + parts[1];
-                const time_val = new Date(timestr); // JavaScriptのDateオブジェクトに変換
+                const time_val = new Date(timestr);
                 
                 const lat = parseFloat(parts[2]);
                 const lon = parseFloat(parts[3]);
@@ -205,7 +193,7 @@
                 addTrackData(lon, lat); // 軌跡グラフ
 
             } catch (e) {
-                console.warn("データ解析エラー:", e, " | 受信データ:", line);
+                // console.warn("データ解析エラー:", e, " | 受信データ:", line);
             }
         });
 

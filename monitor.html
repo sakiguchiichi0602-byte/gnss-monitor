@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>GNSS リアルタイム監視</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    
+    <style>
+        /* ページのレイアウト設定 */
+        body { font-family: sans-serif; display: grid; 
+               grid-template-columns: 2fr 1fr; /* 左: 2, 右: 1 の比率 */
+               grid-template-rows: auto 1fr 1fr; 
+               height: 95vh; gap: 10px; padding: 10px; }
+        h1 { grid-column: 1 / -1; margin: 0; } /* 全幅 */
+        #status-display { 
+            grid-column: 1 / -1; /* 全幅 */
+            text-align: center; font-size: 2em; font-weight: bold; 
+            padding: 10px; border: 1px solid #ccc; border-radius: 5px; 
+        }
+        .chart-container { position: relative; height: 100%; width: 100%; }
+        /* 軌跡グラフ(右側)は縦に2スパン使う */
+        #track-chart-container { grid-row: 2 / span 2; } 
+    </style>
+</head>
+<body>
+
+    <h1>リアルタイム GNSS監視ダッシュボード</h1>
+    
+    <div id="status-display">ステータス: 接続中...</div>
+
+    <div class="chart-container" id="lat-chart-container"><canvas id="latChart"></canvas></div>
+    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
+    <div class="chart-container" id="lon-chart-container"><canvas id="lonChart"></canvas></div>
+    <div class="chart-container" id="ns-chart-container"><canvas id="nsChart"></canvas></div>
+
+    <script>
+        // --- 1. MQTT接続設定 ---
+        // ★ ラズパイ(streamer.py)と設定を合わせる ★
+        const MQTT_BROKER = "ws://test.mosquitto.org:8081"; // ★ ws:// とポート 8081 を使用
+        const MQTT_TOPIC = "gnss/raspi/sbf-rtk"; 
+
+        const MAX_POINTS = 200; // グラフに表示する最大点数
+        
+        // 測位ステータス(Q)のマッピング
+        const STATUS_MAP = {
+            "1": "FIX (高精度)",
+            "2": "FLOAT (準高精度)",
+            "5": "SINGLE (単独)",
+            "0": "---",
+            "6": "PPP"
+        };
+
+        const statusDisplay = document.getElementById('status-display');
+
+        // --- 2. グラフの初期化 (Chart.js) ---
+        // 時系列グラフ(緯度, 経度, 衛星数)を作成する共通関数
+        function createChart(canvasId, yLabel) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: yLabel,
+                        data: [], // データは空で初期化
+                        borderColor: (yLabel.includes('緯度') ? 'blue' : (yLabel.includes('経度') ? 'orange' : 'gray')),
+                        borderWidth: 1.5,
+                        pointRadius: 2,
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    animation: false, // リアルタイム描画のため軽量化
+                    scales: {
+                        x: {
+                            type: 'time', // X軸は時間
+                            time: {
+                                unit: 'second',
+                                displayFormats: { second: 'HH:mm:ss' } // 時:分:秒
+                            },
+                            ticks: { maxRotation: 45, minRotation: 45 }
+                        },
+                        y: {
+                            title: { display: true, text: yLabel },
+                            ticks: { 
+                                // 緯度経度の場合は小数点以下6桁まで表示
+                                format: (yLabel.includes('緯度') || yLabel.includes('経度')) ? { precision: 6 } : {}
+                            }
+                        }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+        }
+        
+        // 軌跡グラフ (X=Lon, Y=Lat)
+        const trackCtx = document.getElementById('trackChart').getContext('2d');
+        const trackChart = new Chart(trackCtx, {
+            type: 'scatter', // 軌跡なので散布図
+            data: {
+                datasets: [{
+                    label: '軌跡',
+                    data: [],
+                    borderColor: 'green',
+                    backgroundColor: 'green',
+                    showLine: true, // 線で結ぶ
+                    tension: 0.1
+                }]
+            },
+            options: {
+                animation: false,
+                scales: {
+                    x: { title: { display: true, text: '経度 (Lon)' }, ticks: { format: { precision: 6 } } },
+                    y: { title: { display: true, text: '緯度 (Lat)' }, ticks: { format: { precision: 6 } } }
+                },
+                aspectRatio: 1, // 緯度経度の縮尺を合わせる
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        const latChart = createChart('latChart', '緯度 (Lat)');
+        const lonChart = createChart('lonChart', '経度 (Lon)');
+        const nsChart = createChart('nsChart', '使用衛星数 (NS)');
+        
+        // --- 3. グラフデータ更新用関数 ---
+        function addDataToChart(chart, timestamp, value) {
+            const data = chart.data.datasets[0].data;
+            if (data.length >= MAX_POINTS) {
+                data.shift(); // 古いデータを削除
+            }
+            data.push({ x: timestamp, y: value });
+            chart.update('quiet'); // アニメーションなしで更新
+        }
+        
+        function addTrackData(lon, lat) {
+            const data = trackChart.data.datasets[0].data;
+            if (data.length >= MAX_POINTS) {
+                data.shift();
+            }
+            data.push({ x: lon, y: lat });
+            trackChart.update('quiet');
+        }
+
+
+        // --- 4. MQTTクライアントのセットアップ ---
+        console.log(`MQTTブローカー (${MQTT_BROKER}) に接続します...`);
+        const client = mqtt.connect(MQTT_BROKER);
+
+        client.on('connect', () => {
+            console.log('MQTTブローカーに接続しました。');
+            statusDisplay.textContent = "MQTT接続完了。データ待機中...";
+            statusDisplay.style.color = "orange";
+            
+            client.subscribe(MQTT_TOPIC, (err) => {
+                if (err) {
+                    console.error('購読失敗:', err);
+                    statusDisplay.textContent = "トピック購読失敗";
+                    statusDisplay.style.color = "red";
+                } else {
+                    console.log(`トピック '${MQTT_TOPIC}' の購読を開始しました。`);
+                }
+            });
+        });
+
+        client.on('error', (err) => {
+            console.error('MQTT接続エラー:', err);
+            statusDisplay.textContent = "MQTT接続エラー";
+            statusDisplay.style.color = "red";
+        });
+
+        // --- 5. メッセージ受信時の処理 (メインロジック) ---
+        client.on('message', (topic, payload) => {
+            try {
+                const line = payload.toString().trim();
+                const parts = line.split(/\s+/); // 複数のスペースで分割
+                
+                if (parts.length < 7 || parts[0].startsWith('%')) {
+                    return; // ヘッダーや不正なデータを無視
+                }
+                
+                // YYYY/MM/DD HH:MM:SS.sss
+                const timestr = parts[0] + " " + parts[1];
+                const time_val = new Date(timestr); // JavaScriptのDateオブジェクトに変換
+                
+                const lat = parseFloat(parts[2]);
+                const lon = parseFloat(parts[3]);
+                const status_q = parts[5];
+                const ns = parseInt(parts[6]);
+
+                // ステータス表示を更新
+                const statusText = STATUS_MAP[status_q] || `不明(${status_q})`;
+                statusDisplay.textContent = `測位ステータス: ${statusText} (衛星数: ${ns})`;
+                
+                if (status_q === "1") statusDisplay.style.color = "green";
+                else if (status_q === "2") statusDisplay.style.color = "orange";
+                else statusDisplay.style.color = "red";
+                
+                // グラフにデータを追加
+                addDataToChart(latChart, time_val, lat);
+                addDataToChart(lonChart, time_val, lon);
+                addDataToChart(nsChart, time_val, ns);
+                addTrackData(lon, lat); // 軌跡グラフ
+
+            } catch (e) {
+                console.warn("データ解析エラー:", e, " | 受信データ:", line);
+            }
+        });
+
+    </script>
+</body>
+</html>

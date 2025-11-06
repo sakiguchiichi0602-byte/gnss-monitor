@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>GNSS リアルタイム監視</title>
+    <title>GNSS リアルタイム監視 (残差対応)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
@@ -10,34 +10,31 @@
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     
     <style>
-        /* ★★★ レイアウト修正 (GridSpec風) ★★★ */
+        /* レイアウト (Python版の gs[2, 2, height_ratios=[1.5, 1]] に近いレイアウト) */
         body { 
             font-family: sans-serif; 
             display: grid; 
-            /* 3行 x 2列 (左:時系列(幅1.5), 右:軌跡(幅1)) */
-            grid-template-columns: 1.5fr 1fr;
-            grid-template-rows: auto auto 1fr 1fr 1fr; /* ヘッダー2行 + グラフ3行 */
+            /* 2行 x 2列 (左上: 軌跡(大), 左下: 衛星数, 右: 残差) */
+            grid-template-columns: 1.5fr 1fr; /* 左: 1.5, 右: 1 の比率 */
+            grid-template-rows: auto auto 1.5fr 1fr; /* ヘッダー2行 + グラフ(1.5:1) */
             height: 95vh; 
             gap: 10px; 
             padding: 10px; 
         }
-        h1 { grid-column: 1 / -1; grid-row: 1; margin: 0; } /* 全幅 (1行目) */
+        h1 { grid-column: 1 / -1; grid-row: 1; margin: 0; }
         #status-display { 
-            grid-column: 1 / -1; /* 全幅 (2行目) */
-            grid-row: 2;
+            grid-column: 1 / -1; grid-row: 2;
             text-align: center; font-size: 1.5em; font-weight: bold; 
             padding: 5px; border: 1px solid #ccc; border-radius: 5px; 
         }
         
         /* --- グラフの配置 --- */
-        /* 左列 */
-        #lat-chart-container { grid-row: 3; grid-column: 1; }
-        #lon-chart-container { grid-row: 4; grid-column: 1; }
-        #ns-chart-container  { grid-row: 5; grid-column: 1; }
+        #track-chart-container { grid-row: 3; grid-column: 1; }
+        #ns-chart-container    { grid-row: 4; grid-column: 1; }
         
-        /* 右列 (3行目から3行分を結合) */
-        #track-chart-container { 
-            grid-row: 3 / span 3; 
+        /* 右列 (3行目から2行分を結合) */
+        #residual-chart-container { 
+            grid-row: 3 / span 2; 
             grid-column: 2;
         }
 
@@ -50,87 +47,80 @@
     
     <div id="status-display">ステータス: 接続中...</div>
 
-    <div class="chart-container" id="lat-chart-container"><canvas id="latChart"></canvas></div>
-    <div class="chart-container" id="lon-chart-container"><canvas id="lonChart"></canvas></div>
+    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
     <div class="chart-container" id="ns-chart-container"><canvas id="nsChart"></canvas></div>
     
-    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
+    <div class="chart-container" id="residual-chart-container"><canvas id="residualChart"></canvas></div>
 
     <script>
         // --- 1. MQTT接続設定 ---
-        const MQTT_BROKER = "wss://test.mosquitto.org:8081"; // ws:// とポート 8081
+        const MQTT_BROKER = "wss://test.mosquitto.org:8081"; // WebSocketポート
         const MQTT_TOPIC = "gnss/raspi/sbf-rtk"; // ラズパイ(streamer.py)と合わせる
 
-        const MAX_POINTS = 200;
+        const MAX_POINTS = 200; // 軌跡・衛星数
+        const MAX_RESIDUAL_POINTS = 50; // 残差
         
-        const STATUS_MAP = {
-            "1": "FIX (高精度)", "2": "FLOAT (準高精度)", "5": "SINGLE (単独)",
-            "0": "---", "6": "PPP"
-        };
-
+        const STATUS_MAP = {"1": "FIX (高精度)", "2": "FLOAT", "5": "SINGLE", "0": "---", "6": "PPP"};
         const statusDisplay = document.getElementById('status-display');
+        
+        let current_time = null; // $POSから$SATに渡すための現在時刻
+        const satellite_colors = {}; // 衛星ごとの色
+        const residual_datasets = {}; // 衛星ごとのChart.jsデータセット
 
         // --- 2. グラフの初期化 (Chart.js) ---
-        // 時系列グラフ(緯度, 経度, 衛星数)を作成する共通関数
-        function createChart(canvasId, yLabel) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-            return new Chart(ctx, {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        label: yLabel, data: [],
-                        borderColor: (yLabel.includes('緯度') ? 'blue' : (yLabel.includes('経度') ? 'orange' : 'gray')),
-                        borderWidth: 1.5, pointRadius: 2, tension: 0.1
-                    }]
-                },
-                options: {
-                    animation: false,
-                    scales: {
-                        x: {
-                            type: 'time',
-                            time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
-                            ticks: { maxRotation: 45, minRotation: 45 }
-                        },
-                        y: {
-                            title: { display: true, text: yLabel },
-                            ticks: { 
-                                format: (yLabel.includes('緯度') || yLabel.includes('経度')) ? { precision: 6 } : {}
-                            }
-                        }
-                    },
-                    plugins: { legend: { display: false } },
-                    maintainAspectRatio: false // コンテナサイズに合わせる
-                }
-            });
-        }
-        
+
         // 軌跡グラフ (X=Lon, Y=Lat)
         const trackCtx = document.getElementById('trackChart').getContext('2d');
         const trackChart = new Chart(trackCtx, {
             type: 'scatter',
-            data: {
-                datasets: [{
-                    label: '軌跡', data: [],
-                    borderColor: 'green', backgroundColor: 'green',
-                    showLine: true, tension: 0.1
-                }]
-            },
+            data: { datasets: [{
+                label: '軌跡', data: [], borderColor: 'green', backgroundColor: 'green',
+                showLine: true, tension: 0.1, pointRadius: 2
+            }]},
             options: {
-                animation: false,
+                animation: false, title: { display: true, text: '軌跡 (Lat vs Lon)' },
                 scales: {
                     x: { title: { display: true, text: '経度 (Lon)' }, ticks: { format: { precision: 6 } } },
                     y: { title: { display: true, text: '緯度 (Lat)' }, ticks: { format: { precision: 6 } } }
                 },
-                aspectRatio: 1, // 縮尺を合わせる
-                plugins: { legend: { display: false } },
+                aspectRatio: 1, plugins: { legend: { display: false } }, maintainAspectRatio: false
+            }
+        });
+
+        // 衛星数グラフ (X=Time, Y=NS)
+        const nsCtx = document.getElementById('nsChart').getContext('2d');
+        const nsChart = new Chart(nsCtx, {
+            type: 'line',
+            data: { datasets: [{
+                label: '衛星数', data: [], borderColor: 'gray',
+                borderWidth: 1.5, pointRadius: 2, tension: 0.1
+            }]},
+            options: {
+                animation: false, title: { display: true, text: '使用衛星数 (NS)' },
+                scales: {
+                    x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } }, ticks: { maxRotation: 45, minRotation: 45 } },
+                    y: { title: { display: true, text: '衛星数' }, min: 0 }
+                },
+                plugins: { legend: { display: false } }, maintainAspectRatio: false
+            }
+        });
+        
+        // 残差グラフ (X=Time, Y=Residual)
+        const residualCtx = document.getElementById('residualChart').getContext('2d');
+        const residualChart = new Chart(residualCtx, {
+            type: 'line',
+            data: { datasets: [] }, // データセットは動的に追加
+            options: {
+                animation: false, title: { display: true, text: '衛星ごと疑似距離残差 (m)' },
+                scales: {
+                    x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } }, ticks: { maxRotation: 45, minRotation: 45 } },
+                    y: { title: { display: true, text: '残差 (Resp) [m]' }, min: -5, max: 5 } // Y軸を-5m～+5mに固定
+                },
+                plugins: { legend: { display: true, position: 'top' } }, // 凡例を表示
                 maintainAspectRatio: false
             }
         });
 
-        const latChart = createChart('latChart', '緯度 (Lat)');
-        const lonChart = createChart('lonChart', '経度 (Lon)');
-        const nsChart = createChart('nsChart', '使用衛星数 (NS)');
-        
         // --- 3. グラフデータ更新用関数 ---
         function addDataToChart(chart, timestamp, value) {
             const data = chart.data.datasets[0].data;
@@ -144,6 +134,37 @@
             if (data.length >= MAX_POINTS) data.shift();
             data.push({ x: lon, y: lat });
             trackChart.update('quiet');
+        }
+        
+        function addResidualData(timestamp, sat_id, residual) {
+            if (!(sat_id in residual_datasets)) {
+                // 新しい衛星の色とデータセットを作成
+                const r = Math.floor(Math.random() * 255);
+                const g = Math.floor(Math.random() * 255);
+                const b = Math.floor(Math.random() * 255);
+                const color = `rgb(${r},${g},${b})`;
+                satellite_colors[sat_id] = color;
+                
+                const newDataset = {
+                    label: sat_id,
+                    data: [],
+                    borderColor: color,
+                    borderWidth: 1.5, pointRadius: 2,
+                    tension: 0.1
+                };
+                residual_datasets[sat_id] = newDataset;
+                residualChart.data.datasets.push(newDataset);
+            }
+            
+            const data = residual_datasets[sat_id].data;
+            if (data.length >= MAX_RESIDUAL_POINTS) data.shift();
+            data.push({ x: timestamp, y: residual });
+            
+            // 全衛星のデータが揃ったタイミングで更新 (負荷軽減のため)
+            // Note: 実際には$POSのタイミングで更新するのが望ましいが、簡略化
+            if (sat_id.startsWith('G01')) { // 代表衛星(G01)が来たら更新
+                 residualChart.update('quiet');
+            }
         }
 
         // --- 4. MQTTクライアントのセットアップ ---
@@ -166,31 +187,45 @@
         client.on('message', (topic, payload) => {
             try {
                 const line = payload.toString().trim();
-                const parts = line.split(/\s+/); 
                 
-                if (parts.length < 7 || parts[0].startsWith('%')) return;
-                
-                const timestr = parts[0] + " " + parts[1];
-                const time_val = new Date(timestr);
-                
-                const lat = parseFloat(parts[2]);
-                const lon = parseFloat(parts[3]);
-                const status_q = parts[5];
-                const ns = parseInt(parts[6]);
+                if (line.startsWith('$POS')) { // LLH (測位結果) - スペース区切り
+                    const parts = line.split(/\s+/);
+                    if (parts.length < 7 || parts[0].startsWith('%')) return;
+                    
+                    const timestr = parts[2] + " " + parts[3];
+                    current_time = new Date(timestr); // ★時刻をグローバルに保存
+                    
+                    const lat = parseFloat(parts[4]);
+                    const lon = parseFloat(parts[5]);
+                    const status_q = parts[7];
+                    const ns = parseInt(parts[8]);
 
-                // ステータス表示を更新
-                const statusText = STATUS_MAP[status_q] || `不明(${status_q})`;
-                statusDisplay.textContent = `測位ステータス: ${statusText} (衛星数: ${ns})`;
-                
-                if (status_q === "1") statusDisplay.style.color = "green";
-                else if (status_q === "2") statusDisplay.style.color = "orange";
-                else statusDisplay.style.color = "red";
-                
-                // グラフにデータを追加
-                addDataToChart(latChart, time_val, lat);
-                addDataToChart(lonChart, time_val, lon);
-                addDataToChart(nsChart, time_val, ns);
-                addTrackData(lon, lat); // 軌跡グラフ
+                    // ステータス表示を更新
+                    const statusText = STATUS_MAP[status_q] || `不明(${status_q})`;
+                    statusDisplay.textContent = `測位ステータス: ${statusText} (衛星数: ${ns})`;
+                    
+                    if (status_q === "1") statusDisplay.style.color = "green";
+                    else if (status_q === "2") statusDisplay.style.color = "orange";
+                    else statusDisplay.style.color = "red";
+                    
+                    // グラフにデータを追加
+                    addDataToChart(nsChart, current_time, ns);
+                    addTrackData(lon, lat);
+
+                } else if (line.startsWith('$SAT')) { // SAT (残差) - カンマ区切り
+                    if (!current_time) return; // $POSがまだ来ていない
+                    
+                    const parts = line.split(',');
+                    if (parts.length < 7) return;
+
+                    const sat_id = parts[2];
+                    const elevation = parseFloat(parts[4]);
+                    const residual_p = parseFloat(parts[5]); // 疑似距離残差 (Resp)
+                    
+                    if (elevation < 15) return; // 低仰角は無視
+
+                    addResidualData(current_time, sat_id, residual_p);
+                }
 
             } catch (e) {
                 // console.warn("データ解析エラー:", e, " | 受信データ:", line);

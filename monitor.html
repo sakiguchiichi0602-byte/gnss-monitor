@@ -1,206 +1,213 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <title>GNSS リアルタイム監視</title>
+import japanize_matplotlib
+import paho.mqtt.client as mqtt
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque, defaultdict
+import datetime as dt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FormatStrFormatter
+import threading
+import random
+
+# --- ラズパイ(streamer.py)と設定を合わせる ---
+MQTT_BROKER = "test.mosquitto.org"
+MQTT_TOPIC = "gnss/raspi/sbf-rtk"
+# ----------------------------------------
+
+MAX_POINTS = 200
+time_data = deque(maxlen=MAX_POINTS)
+lat_data = deque(maxlen=MAX_POINTS)
+lon_data = deque(maxlen=MAX_POINTS)
+ns_data = deque(maxlen=MAX_POINTS)
+
+# 衛星ごとのSNRデータを保持 (ID: deque)
+snr_data = defaultdict(lambda: deque(maxlen=MAX_POINTS))
+snr_times = deque(maxlen=MAX_POINTS) # SNR用の共通時刻軸
+satellite_colors = {}
+satellite_lines = {}
+
+current_solution_status = "---"
+current_time = None
+
+STATUS_MAP = {"1": "SINGLE", "2": "DGPS", "4": "FIX", "5": "FLOAT", "0": "INVALID"}
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print(f"MQTTブローカー ({MQTT_BROKER}) に接続しました。")
+        print(f"トピック '{MQTT_TOPIC}' の購読を開始します...")
+        client.subscribe(MQTT_TOPIC)
+    else:
+        print(f"MQTT接続失敗 (code: {rc})")
+
+def parse_nmea_latlon(val_str, direction):
+    """NMEAのDDmm.mmmm形式を度(Degree)に変換"""
+    val = float(val_str)
+    deg = int(val / 100)
+    minutes = val - (deg * 100)
+    result = deg + (minutes / 60)
+    if direction == 'S' or direction == 'W':
+        result = -result
+    return result
+
+def on_message(client, userdata, msg):
+    global current_solution_status, current_time
+    try:
+        line = msg.payload.decode('utf-8').strip()
+        parts = line.split(',')
+        
+        if line.startswith('$GPGGA'): # 測位結果 (位置, ステータス, 衛星数)
+            # $GPGGA,HHMMSS.ss,Lat,N,Lon,E,Q,NS,HDOP,H,M,...
+            if len(parts) < 10: return
+
+            # 時刻 (JSTに変換 - NMEAはUTC)
+            timestr = parts[1]
+            if not timestr: return
+            now = dt.datetime.utcnow().replace(
+                hour=int(timestr[0:2]), 
+                minute=int(timestr[2:4]), 
+                second=int(timestr[4:6]),
+                microsecond=int(float(timestr[6:])*1000000)
+            )
+            current_time = now + dt.timedelta(hours=9) # JSTに
+            
+            lat = parse_nmea_latlon(parts[2], parts[3])
+            lon = parse_nmea_latlon(parts[4], parts[5])
+            status_q = parts[6]
+            ns = int(parts[7])
+            
+            time_data.append(current_time)
+            lat_data.append(lat)
+            lon_data.append(lon)
+            ns_data.append(ns)
+            
+            current_solution_status = STATUS_MAP.get(status_q, f"不明({status_q})")
+            print(f"受信(GGA): {current_time}, Lat={lat:.6f}, Lon={lon:.6f}, Q={status_q}, NS={ns}")
+
+        elif line.startswith('$GPGSV'): # 衛星ごとのSNR (信号強度)
+            # $GPGSV,NumMsg,MsgNum,TotalSats,Sat1,El,Az,SNR,Sat2,El,Az,SNR,...
+            if not current_time: return # まだGGAを受信していない
+            
+            if not snr_times or snr_times[-1] != current_time:
+                snr_times.append(current_time)
+
+            # 1行に最大4衛星分の情報
+            for i in range(4, len(parts) - 3, 4):
+                sat_id = f"G{parts[i]}" # (GPS衛星のみ ($GPGSV) と仮定)
+                snr_str = parts[i+3].split('*')[0] # (チェックサムを除去)
+                if snr_str:
+                    snr = int(snr_str)
+                    snr_data[sat_id].append(snr)
+                    print(f"受信(GSV): {sat_id}, SNR={snr} dBHz")
+                else:
+                    # SNRがNULL (追跡中だが値なし)
+                    snr_data[sat_id].append(0)
+
+    except Exception as e:
+        # print(f"NMEA解析エラー: {e} (データ: {line})")
+        pass
+
+def animate(i, fig, ax_track, ax_ns, ax_snr, line_track, line_ns, status_text):
+    if not time_data:
+        return line_track, line_ns, status_text
     
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    # 1. 軌跡グラフ
+    line_track.set_data(lon_data, lat_data)
+    ax_track.relim()
+    ax_track.autoscale_view()
+    ax_track.set_aspect('equal', adjustable='datalim')
+
+    # 2. 衛星数グラフ
+    line_ns.set_data(time_data, ns_data)
+    ax_ns.relim()
+    ax_ns.autoscale_view()
+
+    # 3. SNRグラフ
+    ax_snr.legend_ = None
+    ax_snr.lines.clear() # 衛星が入れ替わるため毎回クリア
+    satellite_lines.clear()
     
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    for sat_id, data in snr_data.items():
+        if not data: continue
+        # GSVとGGAの時刻同期 (データ数が合うように調整)
+        times_to_plot = list(snr_times)[-len(data):]
+        if len(times_to_plot) == len(data):
+            if sat_id not in satellite_colors:
+                satellite_colors[sat_id] = (random.random(), random.random(), random.random())
+            
+            line, = ax_snr.plot(times_to_plot, data, '.-', markersize=3, label=sat_id, color=satellite_colors[sat_id])
+            satellite_lines[sat_id] = line
     
-    <style>
-        /* ★★★ レイアウト修正 (GridSpec風) ★★★ */
-        body { 
-            font-family: sans-serif; 
-            display: grid; 
-            /* 3行 x 2列 (左:時系列(幅1.5), 右:軌跡(幅1)) */
-            grid-template-columns: 1.5fr 1fr;
-            grid-template-rows: auto auto 1fr 1fr 1fr; /* ヘッダー2行 + グラフ3行 */
-            height: 95vh; 
-            gap: 10px; 
-            padding: 10px; 
-        }
-        h1 { grid-column: 1 / -1; grid-row: 1; margin: 0; } /* 全幅 (1行目) */
-        #status-display { 
-            grid-column: 1 / -1; /* 全幅 (2行目) */
-            grid-row: 2;
-            text-align: center; font-size: 1.5em; font-weight: bold; 
-            padding: 5px; border: 1px solid #ccc; border-radius: 5px; 
-        }
-        
-        /* --- グラフの配置 --- */
-        /* 左列 */
-        #lat-chart-container { grid-row: 3; grid-column: 1; }
-        #lon-chart-container { grid-row: 4; grid-column: 1; }
-        #ns-chart-container  { grid-row: 5; grid-column: 1; }
-        
-        /* 右列 (3行目から3行分を結合) */
-        #track-chart-container { 
-            grid-row: 3 / span 3; 
-            grid-column: 2;
-        }
+    ax_snr.relim()
+    ax_snr.autoscale_view()
+    ax_snr.set_ylim(0, 60) # SNR Y軸を 0-60 dBHzに固定
+    ax_snr.legend(loc='upper right', fontsize='small', ncol=2)
 
-        .chart-container { position: relative; height: 100%; width: 100%; }
-    </style>
-</head>
-<body>
+    # 4. ステータステキスト
+    status_text.set_text(f"測位ステータス: {current_solution_status}")
+    if current_solution_status == "FIX": status_text.set_color('green')
+    elif current_solution_status == "FLOAT": status_text.set_color('orange')
+    else: status_text.set_color('red')
 
-    <h1>リアルタイム GNSS監視ダッシュボード</h1>
-    
-    <div id="status-display">ステータス: 接続中...</div>
+    return line_track, line_ns, status_text
 
-    <div class="chart-container" id="lat-chart-container"><canvas id="latChart"></canvas></div>
-    <div class="chart-container" id="lon-chart-container"><canvas id="lonChart"></canvas></div>
-    <div class="chart-container" id="ns-chart-container"><canvas id="nsChart"></canvas></div>
-    
-    <div class="chart-container" id="track-chart-container"><canvas id="trackChart"></canvas></div>
+# --- メイン処理 ---
+# 1. MQTTクライアントを別スレッドで起動
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+client.on_connect = on_connect
+client.on_message = on_message
+threading.Thread(target=client.loop_forever, daemon=True).start()
+client.connect(MQTT_BROKER, 1883, 60)
 
-    <script>
-        // --- 1. MQTT接続設定 ---
-        const MQTT_BROKER = "wss://test.mosquitto.org:8081"; // ws:// とポート 8081
-        const MQTT_TOPIC = "gnss/raspi/sbf-rtk"; // ラズパイ(streamer.py)と合わせる
+# 2. Matplotlibのグラフ準備
+fig = plt.figure(figsize=(14, 8))
+fig.suptitle("リアルタイム GNSS監視ダッシュボード (NMEA)", fontsize=16)
+gs = fig.add_gridspec(2, 2, height_ratios=[1.5, 1])
 
-        const MAX_POINTS = 200;
-        
-        const STATUS_MAP = {
-            "1": "FIX (高精度)", "2": "FLOAT (準高精度)", "5": "SINGLE (単独)",
-            "0": "---", "6": "PPP"
-        };
+# --- 左上の軌跡グラフ ---
+ax_track = fig.add_subplot(gs[0, 0])
+ax_track.set_title("軌跡 (Lat vs Lon)")
+ax_track.set_xlabel("経度 (Longitude)")
+ax_track.set_ylabel("緯度 (Latitude)")
+ax_track.grid(True)
+ax_track.yaxis.set_major_formatter(FormatStrFormatter('%.6f'))
+ax_track.xaxis.set_major_formatter(FormatStrFormatter('%.6f'))
+line_track, = ax_track.plot([], [], '.-', color='green')
 
-        const statusDisplay = document.getElementById('status-display');
+# --- 左下の衛星数グラフ ---
+ax_ns = fig.add_subplot(gs[1, 0])
+ax_ns.set_title("使用衛星数 (NS from GGA)")
+ax_ns.set_xlabel("時刻 (JST)")
+ax_ns.set_ylabel("衛星数")
+ax_ns.grid(True)
+ax_ns.set_ylim(0, 40)
+line_ns, = ax_ns.plot([], [], '.-', color='gray')
+ax_ns.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
 
-        // --- 2. グラフの初期化 (Chart.js) ---
-        // 時系列グラフ(緯度, 経度, 衛星数)を作成する共通関数
-        function createChart(canvasId, yLabel) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-            return new Chart(ctx, {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        label: yLabel, data: [],
-                        borderColor: (yLabel.includes('緯度') ? 'blue' : (yLabel.includes('経度') ? 'orange' : 'gray')),
-                        borderWidth: 1.5, pointRadius: 2, tension: 0.1
-                    }]
-                },
-                options: {
-                    animation: false,
-                    scales: {
-                        x: {
-                            type: 'time',
-                            time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
-                            ticks: { maxRotation: 45, minRotation: 45 }
-                        },
-                        y: {
-                            title: { display: true, text: yLabel },
-                            ticks: { 
-                                format: (yLabel.includes('緯度') || yLabel.includes('経度')) ? { precision: 6 } : {}
-                            }
-                        }
-                    },
-                    plugins: { legend: { display: false } },
-                    maintainAspectRatio: false // コンテナサイズに合わせる
-                }
-            });
-        }
-        
-        // 軌跡グラフ (X=Lon, Y=Lat)
-        const trackCtx = document.getElementById('trackChart').getContext('2d');
-        const trackChart = new Chart(trackCtx, {
-            type: 'scatter',
-            data: {
-                datasets: [{
-                    label: '軌跡', data: [],
-                    borderColor: 'green', backgroundColor: 'green',
-                    showLine: true, tension: 0.1
-                }]
-            },
-            options: {
-                animation: false,
-                scales: {
-                    x: { title: { display: true, text: '経度 (Lon)' }, ticks: { format: { precision: 6 } } },
-                    y: { title: { display: true, text: '緯度 (Lat)' }, ticks: { format: { precision: 6 } } }
-                },
-                aspectRatio: 1, // 縮尺を合わせる
-                plugins: { legend: { display: false } },
-                maintainAspectRatio: false
-            }
-        });
+# --- 右側のSNRグラフ (縦に2スパン結合) ---
+ax_snr = fig.add_subplot(gs[:, 1])
+ax_snr.set_title("衛星ごと信号強度 (SNR from GSV)")
+ax_snr.set_xlabel("時刻 (JST)")
+ax_snr.set_ylabel("信号強度 (SNR) [dBHz]")
+ax_snr.grid(True)
+ax_snr.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
 
-        const latChart = createChart('latChart', '緯度 (Lat)');
-        const lonChart = createChart('lonChart', '経度 (Lon)');
-        const nsChart = createChart('nsChart', '使用衛星数 (NS)');
-        
-        // --- 3. グラフデータ更新用関数 ---
-        function addDataToChart(chart, timestamp, value) {
-            const data = chart.data.datasets[0].data;
-            if (data.length >= MAX_POINTS) data.shift();
-            data.push({ x: timestamp, y: value });
-            chart.update('quiet');
-        }
-        
-        function addTrackData(lon, lat) {
-            const data = trackChart.data.datasets[0].data;
-            if (data.length >= MAX_POINTS) data.shift();
-            data.push({ x: lon, y: lat });
-            trackChart.update('quiet');
-        }
+# 測位ステータス表示用テキスト (図の最上部)
+status_text = fig.text(0.5, 0.95, "測位ステータス: ---", 
+                       ha="center", va="bottom", fontsize=14, color="red")
 
-        // --- 4. MQTTクライアントのセットアップ ---
-        const client = mqtt.connect(MQTT_BROKER);
+fig.autofmt_xdate(rotation=30) # X軸ラベルを斜めにする
 
-        client.on('connect', () => {
-            statusDisplay.textContent = "MQTT接続完了。データ待機中...";
-            statusDisplay.style.color = "orange";
-            client.subscribe(MQTT_TOPIC, (err) => {
-                if (err) statusDisplay.textContent = "トピック購読失敗";
-            });
-        });
+# 3. アニメーションの開始
+ani = FuncAnimation(fig, animate, 
+                    fargs=(fig, ax_track, ax_ns, ax_snr, line_track, line_ns, status_text),
+                    interval=1000,
+                    blit=False, # X軸更新のため False
+                    cache_frame_data=False)
 
-        client.on('error', (err) => {
-            statusDisplay.textContent = "MQTT接続エラー";
-            statusDisplay.style.color = "red";
-        });
+# 4. グラフウィンドウを表示
+plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+plt.show()
 
-        // --- 5. メッセージ受信時の処理 (メインロジック) ---
-        client.on('message', (topic, payload) => {
-            try {
-                const line = payload.toString().trim();
-                const parts = line.split(/\s+/); 
-                
-                if (parts.length < 7 || parts[0].startsWith('%')) return;
-                
-                const timestr = parts[0] + " " + parts[1];
-                const time_val = new Date(timestr);
-                
-                const lat = parseFloat(parts[2]);
-                const lon = parseFloat(parts[3]);
-                const status_q = parts[5];
-                const ns = parseInt(parts[6]);
-
-                // ステータス表示を更新
-                const statusText = STATUS_MAP[status_q] || `不明(${status_q})`;
-                statusDisplay.textContent = `測位ステータス: ${statusText} (衛星数: ${ns})`;
-                
-                if (status_q === "1") statusDisplay.style.color = "green";
-                else if (status_q === "2") statusDisplay.style.color = "orange";
-                else statusDisplay.style.color = "red";
-                
-                // グラフにデータを追加
-                addDataToChart(latChart, time_val, lat);
-                addDataToChart(lonChart, time_val, lon);
-                addDataToChart(nsChart, time_val, ns);
-                addTrackData(lon, lat); // 軌跡グラフ
-
-            } catch (e) {
-                // console.warn("データ解析エラー:", e, " | 受信データ:", line);
-            }
-        });
-
-    </script>
-</body>
-
-</html>
-
-
-
+# 5. グラフを閉じたらMQTTも終了
+client.disconnect()
+print("モニタリングを終了しました。")

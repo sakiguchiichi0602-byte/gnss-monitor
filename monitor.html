@@ -13,6 +13,7 @@
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     
     <style>
+        /* (CSSは変更ありません) */
         body { 
             font-family: sans-serif; 
             display: grid; 
@@ -54,22 +55,23 @@
 
     <script>
         // --- ★★★ 設定項目 (HiveMQ Cloud) ★★★ ---
-        // 1. HiveMQ Cloudの「Public Address」(入力済み)
+        // 1. HiveMQ Cloudの「Public Address」(画像から)
         const MQTT_BROKER_HOST = "249e081497cc4102b789e090b4e02268.s1.eu.hivemq.cloud";
         const MQTT_TOPIC = "gnss/raspi/sbf-rtk-residuals";
 
-        // 2. ★★★ ご自身で作成した「ユーザー名」と「パスワード」を入力してください ★★★
+        // 2. ユーザー名とパスワード (テキストから)
         const MQTT_USERNAME = "irie_lab";
         const MQTT_PASSWORD = "Suya2659";
-        // -----------------------------------------------------------------
 
         // 3. ブラウザ(WebSocket)用の接続URLとオプションを作成
-        const MQTT_BROKER_URL = `wss://${MQTT_BROKER_HOST}:8081/mqtt`; // ★ Port 8081 (WSS) を使用
+        // ★★★ ポートを 8884 に修正 (画像参照) ★★★
+        const MQTT_BROKER_URL = `wss://${MQTT_BROKER_HOST}:8884/mqtt`; 
         const MQTT_OPTIONS = {
             username: MQTT_USERNAME,
             password: MQTT_PASSWORD,
-            connectTimeout: 5000 // 5秒でタイムアウト
+            connectTimeout: 5000 
         };
+        // -----------------------------------------------------------------
 
         const DURATION_SEC = 7200; // 2時間
 
@@ -80,12 +82,10 @@
         const IDX_FREQ_ID = 4;
         const IDX_RES_CODE = 7; // 疑似距離残差 (m)
 
-        // GPSTimeのエポック (1980年1月6日 0時 UTC)
         const GPS_EPOCH = new Date(Date.UTC(1980, 0, 6, 0, 0, 0));
-
         const statusDisplay = document.getElementById('status-display');
         
-        // 衛星ごとの色を保持 (Python版と同じロジック)
+        // (中略: 衛星ごとの色付けロジック)
         const satColors = {};
         const availableColors = [
             '#E6194B', '#3CB44B', '#4363D8', '#F58231', '#911EB4', '#46F0F0', 
@@ -93,7 +93,6 @@
             '#FFFAC8', '#800000', '#AAFFC3', '#808000', '#FFD8B1', '#000075'
         ];
         let colorIndex = 0;
-
         function getSatColor(satId) {
             if (!satColors[satId]) {
                 satColors[satId] = availableColors[colorIndex % availableColors.length];
@@ -101,34 +100,31 @@
             }
             return satColors[satId];
         }
-        
         function getLineStyle(freqId) {
-            if (String(freqId) === '2') return 'dash'; // 破線 (L2)
-            if (['5', '7'].includes(String(freqId))) return 'dot'; // 点線 (L5/L7)
-            return 'solid'; // 実線 (L1)
+            if (String(freqId) === '2') return 'dash';
+            if (['5', '7'].includes(String(freqId))) return 'dot';
+            return 'solid';
         }
 
         // --- グラフの初期化 (Chart.js) ---
+        // (中略: グラフ設定、JST表示設定は変更なし)
         const resCtx = document.getElementById('residualChart').getContext('2d');
         const residualChart = new Chart(resCtx, {
             type: 'line',
-            data: {
-                datasets: [] // データセットは動的に追加する
-            },
+            data: { datasets: [] },
             options: {
                 animation: false,
                 scales: {
                     x: {
-                        type: 'realtime', // ストリーミングプラグイン
+                        type: 'realtime',
                         realtime: {
-                            duration: DURATION_SEC * 1000, // 2時間 (ミリ秒)
-                            refresh: 2000, // 2秒ごとにグラフ描画
+                            duration: DURATION_SEC * 1000,
+                            refresh: 1000, // 1秒ごとに更新
                             delay: 1000,
                         },
                         time: { 
                             unit: 'minute', 
                             displayFormats: { minute: 'HH:mm' },
-                            // ★ JST表示のためのアダプタ設定
                             adapter: {
                                 date: dateFns.parseISO,
                                 format: dateFns.format,
@@ -138,14 +134,12 @@
                                 endOf: dateFns.endOfSecond
                             },
                         },
-                        title: { display: true, text: '時刻 (JST)' }, // ★ JST
-                        // ★ JSTタイムゾーンで表示
+                        title: { display: true, text: '時刻 (JST)' },
                         ticks: {
                            source: 'auto',
                            maxRotation: 45,
                            minRotation: 45,
                            callback: function(value, index, ticks) {
-                                // JST (UTC+9) として時刻をフォーマット
                                 const date = new Date(value);
                                 return dateFns.format(date, 'HH:mm:ss', { locale: dateFns.locale.ja });
                            }
@@ -157,39 +151,26 @@
                         suggestedMax: 2.0,
                     }
                 },
-                plugins: { 
-                    legend: { 
-                        position: 'right', // 凡例を右側に
-                    } 
-                },
+                plugins: { legend: { position: 'right' } },
                 maintainAspectRatio: false
             }
         });
         
-        /**
-         * GPSTime(週, 秒)をJavaScriptのDateオブジェクト(JST)に変換
-         */
+        // (中略: GPSTimeからJSTへの変換ロジック)
         function gpstToDateJST(week, gpst_sec) {
-            // 1. UTC時刻を計算
             const msSinceEpoch = GPS_EPOCH.getTime() + (week * 7 * 24 * 60 * 60 * 1000) + (gpst_sec * 1000);
             const utcDate = new Date(msSinceEpoch);
-            
-            // 2. JST (UTC+9時間) のミリ秒を計算
             const jstTime = utcDate.getTime() + (9 * 60 * 60 * 1000);
             return new Date(jstTime);
         }
-
-        /**
-         * 衛星IDと周波数IDからデータセット(線)を探す (なければ作成する)
-         */
+        
+        // (中略: データセット作成ロジック)
         function getOrCreateDataset(satId, freqId) {
             const label = `${satId} (L${freqId})`;
             let dataset = residualChart.data.datasets.find(ds => ds.label === label);
-            
             if (!dataset) {
                 const color = getSatColor(satId);
                 const style = getLineStyle(freqId);
-
                 dataset = {
                     label: label,
                     data: [],
@@ -207,7 +188,8 @@
 
         // --- MQTTクライアントのセットアップ ---
         console.log(`MQTTブローカー (${MQTT_BROKER_URL}) に接続中...`);
-        const client = mqtt.connect(MQTT_BROKER_URL, MQTT_OPTIONS);
+        // ★ 認証 (MQTT_OPTIONS) *あり* で接続
+        const client = mqtt.connect(MQTT_BROKER_URL, MQTT_OPTIONS); 
 
         client.on('connect', () => {
             statusDisplay.textContent = "MQTT接続完了。データ待機中...";
@@ -230,6 +212,7 @@
         });
 
         // --- メッセージ受信時の処理 ($SATを解析) ---
+        // (ロジックは変更なし)
         client.on('message', (topic, payload) => {
             try {
                 const line = payload.toString().trim();
@@ -240,20 +223,15 @@
                 
                 const sat_id = parts[IDX_SAT_ID];
                 
-                // ★ GPS衛星 ('G') のみプロットするフィルター
-                if (!sat_id.startsWith('G')) {
+                if (!sat_id.startsWith('G')) { // GPSのみフィルター
                     return;
                 }
                 
                 const week = parseInt(parts[IDX_WEEK], 10);
                 const gpst_sec = parseFloat(parts[IDX_GPST_SEC]);
-                
-                // ★ JST時刻に変換
                 const time_val_jst = gpstToDateJST(week, gpst_sec);
-                
                 const freq_id = parts[IDX_FREQ_ID];
                 const residual_val = parseFloat(parts[IDX_RES_CODE]);
-
                 const dataset = getOrCreateDataset(sat_id, freq_id);
                 
                 dataset.data.push({

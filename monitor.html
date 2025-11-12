@@ -156,7 +156,8 @@
 
         // --- 2. MQTTクライアントの初期化と接続 ---
         const clientID = "gnss_web_monitor_" + new Date().getTime();
-        const client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, clientID);
+        //const client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, clientID);
+        const client = new Paho.Client(MQTT_HOST, MQTT_PORT, clientID);
 
         client.onConnectionLost = (responseObject) => {
             if (responseObject.errorCode !== 0) {
@@ -260,5 +261,6 @@
 </body>
 
 </html>
+
 
 

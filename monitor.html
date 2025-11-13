@@ -3,19 +3,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GNSS 残差モニター (Streaming)</title>
+    <title>GNSS 残差モニター</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.js"></script>
-    
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-streaming@2.0.0/dist/chartjs-plugin-streaming.min.js"></script>
 
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
-        #chart-container { position: relative; width: 90vw; height: 70vh; margin-top: 20px; }
-        #status { width: 90vw; padding: 10px; background-color: #eee; border-radius: 5px; font-weight: bold; }
-        #status.error { background-color: #ffdddd; color: #d8000c; }
-        #status.success { background-color: #ddffdd; color: #008000; }
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #chart-container {
+            position: relative;
+            width: 90vw;
+            height: 70vh;
+            margin-top: 20px;
+        }
+        #status {
+            width: 90vw;
+            padding: 10px;
+            background-color: #eee;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        #status.error {
+            background-color: #ffdddd;
+            color: #d8000c;
+        }
+        #status.success {
+            background-color: #ddffdd;
+            color: #008000;
+        }
     </style>
 </head>
 <body>
@@ -26,21 +46,31 @@
     </div>
 
     <script>
-        // --- ★★★★★ 設定項目 (変更なし) ★★★★★ ---
+        // --- ★★★★★ 設定項目 (ラズパイ/PC側と「同じ」設定) ★★★★★ ---
+        // ★★★ 警告: この情報はHTMLソースコードから丸見えになります ★★★
         const MQTT_HOST = "249e081497cc4102b789e090b4e02268.s1.eu.hivemq.cloud";
-        const MQTT_PORT = 8884;
+        const MQTT_PORT = 8884; // ★ WebSockets用のポート (8883ではない)
         const MQTT_TOPIC = "gnss/raspi/sbf-rtk-residuals";
         const MQTT_USERNAME = "irie_lab";
         const MQTT_PASSWORD = "Suya2659";
         // -------------------------------------------------------------
 
-        // --- インデックスと定数 (変更なし) ---
-        const IDX_WEEK = 0, IDX_GPST_SEC = 1, IDX_SAT_ID = 2, IDX_FREQ_ID = 3, IDX_RES_CODE = 4;
+        // --- 軽量版フォーマットのインデックス (Python版と同じ) ---
+        const IDX_WEEK = 0;
+        const IDX_GPST_SEC = 1;
+        const IDX_SAT_ID = 2;
+        const IDX_FREQ_ID = 3;
+        const IDX_RES_CODE = 4;
+
+        // --- Python版と同じロジック ---
+        const MAX_POINTS = 7200; // 2時間分 (データ点数)
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
-        const PLOT_DURATION_MS = 2 * 60 * 60 * 1000; // 2時間 (ミリ秒)
         const statusDiv = document.getElementById('status');
         
-        // --- 色とスタイルの管理 (変更なし) ---
+        // データ保持用のMap (Pythonのdefaultdict(deque)の代わり)
+        const satDataSets = new Map();
+        
+        // 色とスタイルの管理 (Python版と同じ)
         const satColors = new Map();
         let colorIndex = 0;
         const available_colors = [
@@ -48,6 +78,7 @@
             '#F032E6', '#BCF60C', '#FABEBE', '#008080', '#E6BEFF', '#9A6324',
             '#FFFAC8', '#800000', '#AAFFC3', '#808000', '#FFD8B1', '#000075'
         ];
+
         function getSatColor(sat_id) {
             if (!satColors.has(sat_id)) {
                 satColors.set(sat_id, available_colors[colorIndex % available_colors.length]);
@@ -55,73 +86,77 @@
             }
             return satColors.get(sat_id);
         }
+
         function getLineStyle(freq_id) {
             const id_str = String(freq_id);
-            if (id_str === '2') return [5, 5]; // 破線
-            if (id_str === '5' || id_str === '7') return [2, 2]; // 点線
-            return []; // 実線
+            if (id_str === '2') return [5, 5]; // 破線 '--'
+            if (id_str === '5' || id_str === '7') return [2, 2]; // 点線 ':'
+            return []; // 実線 '-'
         }
         
         function updateStatus(message, isError = false) {
             console.log(message);
             statusDiv.textContent = message;
-            if (isError) { statusDiv.className = 'error'; }
-            else { statusDiv.className = (message.includes("接続しました")) ? 'success' : ''; }
+            if (isError) {
+                statusDiv.className = 'error';
+            } else {
+                statusDiv.className = (message.includes("接続しました")) ? 'success' : '';
+            }
         }
 
-        // --- 1. Chart.js の初期化 (★ ストリーミング用にオプションを変更) ---
+        // --- 1. Chart.js の初期化 ---
         const ctx = document.getElementById('residualChart').getContext('2d');
         const residualChart = new Chart(ctx, {
-            type: 'line',
+            type: 'line', // 散布図 (scatter) でも可
             data: {
                 datasets: [] // ここに動的にデータセットが追加される
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                animation: false, // リアルタイム描画のためアニメーションを無効化
+                showLine: true,   // 線を描画
                 scales: {
                     x: {
-                        // ★ 変更: 'time' から 'realtime' に変更
-                        type: 'realtime', 
-                        title: { display: true, text: '時刻 (JST)' },
-                        // ★ 変更: プラグイン設定を追加
-                        realtime: {
-                            // 表示する時間範囲 (ミリ秒)
-                            duration: PLOT_DURATION_MS,
-                            // 新しいデータが来るまで待機する時間
-                            refresh: 1000, 
-                            // グラフが右端に到達してからスクロールするまでの遅延
-                            delay: 2000, 
-                            // ★重要: データが来たら自動でグラフを更新
-                            pause: false,
-                            
-                            // ★ 変更: メッセージ受信(onMessageArrived)でデータを追加
-                            // onRefresh: chart => { /* このデモでは不要 */ }
+                        type: 'time',
+                        title: {
+                            display: true,
+                            text: '時刻 (JST)'
                         },
                         time: {
                             unit: 'minute',
-                            tooltipFormat: 'HH:mm:ss',
-                            displayFormats: { minute: 'HH:mm', hour: 'HH:mm' }
+                            tooltipFormat: 'HH:mm:ss', // ツールチップのフォーマット
+                            displayFormats: {
+                                minute: 'HH:mm',
+                                hour: 'HH:mm'
+                            }
                         }
                     },
                     y: {
-                        title: { display: true, text: '残差 (m)' },
+                        title: {
+                            display: true,
+                            text: '残差 (m)'
+                        },
+                        // Y軸の範囲を自動調整 (Pythonのautoscale_view)
                         suggestedMin: -0.5,
                         suggestedMax: 0.5
                     }
                 },
                 plugins: {
-                    legend: { position: 'top' },
-                    title: { display: true, text: 'GPS衛星 疑似距離残差 (リアルタイム)' }
+                    legend: {
+                        position: 'top',
+                    },
+                    title: {
+                        display: true,
+                        text: 'GPS衛星 疑似距離残差 (リアルタイム)'
+                    }
                 }
             }
         });
 
         // --- 2. MQTTクライアントの初期化と接続 ---
-        const clientID = "gnss_web_monitor_streaming_" + new Date().getTime();
-        
-        // ★ 変更: Paho.MQTT.Client -> Paho.Client (前回修正済み)
-        const client = new Paho.Client(MQTT_HOST, MQTT_PORT, clientID);
+        const clientID = "gnss_web_monitor_" + new Date().getTime();
+        const client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, clientID);
 
         client.onConnectionLost = (responseObject) => {
             if (responseObject.errorCode !== 0) {
@@ -130,70 +165,75 @@
             }
         };
 
-        // --- 3. メッセージ受信時の処理 (★ 変更: ロジックを簡素化) ---
+        // --- 3. メッセージ受信時の処理 (最重要) ---
         client.onMessageArrived = (message) => {
             try {
                 const line = message.payloadString;
                 const parts = line.split(',');
-                if (parts.length < 5) return; 
 
-                // 1. タイムスタンプ計算 (変更なし)
+                if (parts.length < 5) return; // データ形式が不正
+
+                // 1. タイムスタンプを計算 (Python版と同一ロジック)
                 const week = parseInt(parts[IDX_WEEK]);
                 const gpst_sec = parseFloat(parts[IDX_GPST_SEC]);
                 const utc_ms = GPS_EPOCH_MS + (week * 7 * 24 * 60 * 60 * 1000) + (gpst_sec * 1000);
-                const timestamp = new Date(utc_ms); 
+                const timestamp = new Date(utc_ms); // JSのDateオブジェクトに変換
 
-                // 2. 衛星ID, 周波数ID (変更なし)
+                // 2. 衛星ID, 周波数ID
                 const sat_id = parts[IDX_SAT_ID];
                 const freq_id = parts[IDX_FREQ_ID];
                 
-                // 3. 残差 (変更なし)
+                // 3. 疑似距離残差の値
                 const residual_val = parseFloat(parts[IDX_RES_CODE]);
-                if (isNaN(residual_val)) return; 
+                if (isNaN(residual_val)) return; // 数値でなければスキップ
 
                 const key = `${sat_id} (L${freq_id})`;
 
-                // 4. Chart.js用のデータポイントを作成 (変更なし)
+                // 4. Chart.js用のデータポイントを作成
                 const newDataPoint = {
                     x: timestamp,
                     y: residual_val
                 };
 
-                // 5. ★ 変更: 該当するデータセットを探す (Chartオブジェクトから直接探す)
-                let dataset = residualChart.data.datasets.find(ds => ds.label === key);
+                // 5. 該当するデータセットを探す
+                let dataset = satDataSets.get(key);
 
                 if (!dataset) {
-                    // データセットがなければ、新しく作成 (変更なし)
+                    // データセットがなければ、新しく作成
                     dataset = {
                         label: key,
                         data: [],
                         borderColor: getSatColor(sat_id),
                         borderDash: getLineStyle(freq_id),
                         borderWidth: 2,
-                        pointRadius: 0, 
-                        tension: 0.1
+                        pointRadius: 0, // 点を非表示 (線だけにする)
+                        tension: 0.1    // 少し滑らかに
                     };
-                    // グラフに新しいデータセットとして追加 (変更なし)
+                    satDataSets.set(key, dataset);
+                    // グラフに新しいデータセットとして追加
                     residualChart.data.datasets.push(dataset);
                 }
 
-                // 6. ★ 変更: データを追加 (プラグインが自動で古いデータを削除)
+                // 6. データを追加 (Pythonのdeque.append)
                 dataset.data.push(newDataPoint);
-                
-                // ★ 削除: MAX_POINTSの管理と shift() ロジックは不要になった
+
+                // 7. MAX_POINTS を超えたら古いデータを削除 (Pythonのdeque.popleft)
+                if (dataset.data.length > MAX_POINTS) {
+                    dataset.data.shift();
+                }
                 
             } catch (e) {
                 console.error(`データ解析エラー: ${e}`, line);
             }
         };
 
-        // --- 4. 接続処理 (変更なし) ---
+        // --- 4. 接続処理 ---
         function startConnect() {
             updateStatus(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
             client.connect({
                 userName: MQTT_USERNAME,
                 password: MQTT_PASSWORD,
-                useSSL: true, 
+                useSSL: true, // WSS (セキュアWebSockets) を使用
                 onSuccess: () => {
                     updateStatus(`MQTTブローカーに接続しました。トピック '${MQTT_TOPIC}' の購読を開始します...`, false);
                     client.subscribe(MQTT_TOPIC);
@@ -204,9 +244,14 @@
             });
         }
         
-        // --- 5. ★ 削除: グラフの更新ループは不要 ---
-        // 1秒ごとの setInterval(residualChart.update) は、
-        // ストリーミングプラグインが自動で行うため、削除します。
+        // --- 5. グラフの更新ループ ---
+        // 毎秒グラフを再描画する (PythonのFuncAnimation(interval=1000) と同じ役割)
+        // メッセージが来るたびに描画すると重すぎるため
+        setInterval(() => {
+            if (client.isConnected()) {
+                residualChart.update('none'); // アニメーションなしで更新
+            }
+        }, 1000);
 
         // --- 実行開始 ---
         startConnect();

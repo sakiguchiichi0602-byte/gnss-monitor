@@ -106,7 +106,7 @@
         // -------------------------------------------------------------
 
         // --- データ点数 60 (変更なし) ---
-        const MAX_POINTS = 3600; 
+        const MAX_POINTS = 300; 
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         const statusDiv = document.getElementById('status');
@@ -143,28 +143,23 @@
         const posData = { t: [], lat: [], lon: [], h: [] };
         const posScatterData = []; 
 
-        // --- ★ 変更: Chart.js 初期化 (X軸の time.unit を 'second' に統一) ---
+        // --- Chart.js 初期化 (X軸同期設定) (変更なし) ---
         const commonXAxisOptions = {
             type: 'time',
             time: {
                 unit: 'second',
                 displayFormats: { second: 'HH:mm:ss' }
             },
-            // ★ X軸の目盛りラベルを一番下のグラフ(heightChart)以外で非表示にする
-            ticks: {
-                display: false // デフォルトは非表示
-            },
-            grid: {
-                drawOnChartArea: false, // X軸の縦グリッド線も非表示
-            }
+            ticks: { display: false },
+            grid: { drawOnChartArea: false }
         };
         
         const ctxRes = document.getElementById('residualChart').getContext('2d');
-        const residualChart = new Chart(ctxRes, { // 1. 残差
+        const residualChart = new Chart(ctxRes, { 
             type: 'line', data: { datasets: [] },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
-                    x: { ...commonXAxisOptions }, // ★ 共通設定を適用
+                    x: { ...commonXAxisOptions }, 
                     y: { title: { display: true, text: '残差 (m)' } } 
                 },
                 plugins: { title: { display: true, text: 'GPS衛星 疑似距離残差 (リアルタイム)' } }
@@ -172,7 +167,7 @@
         });
 
         const ctxLat = document.getElementById('latChart').getContext('2d');
-        const latChart = new Chart(ctxLat, { // 2. 緯度
+        const latChart = new Chart(ctxLat, { 
             type: 'line',
             data: {
                 labels: [], 
@@ -182,7 +177,7 @@
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
-                    x: { ...commonXAxisOptions }, // ★ 共通設定を適用
+                    x: { ...commonXAxisOptions }, 
                     y: { title: { display: true, text: '緯度 (度)' } }
                 },
                 plugins: { title: { display: true, text: '時間 - 緯度' } }
@@ -190,7 +185,7 @@
         });
         
         const ctxLon = document.getElementById('lonChart').getContext('2d');
-        const lonChart = new Chart(ctxLon, { // 3. 経度
+        const lonChart = new Chart(ctxLon, { 
             type: 'line',
             data: {
                 labels: [], 
@@ -200,7 +195,7 @@
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
-                    x: { ...commonXAxisOptions }, // ★ 共通設定を適用
+                    x: { ...commonXAxisOptions }, 
                     y: { title: { display: true, text: '経度 (度)' } }
                 },
                 plugins: { title: { display: true, text: '時間 - 経度' } }
@@ -208,7 +203,7 @@
         });
 
         const ctxHeight = document.getElementById('heightChart').getContext('2d');
-        const heightChart = new Chart(ctxHeight, { // 4. 高さ
+        const heightChart = new Chart(ctxHeight, { 
             type: 'line',
             data: {
                 labels: [], 
@@ -218,15 +213,13 @@
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
-                    x: { // ★ 変更: 一番下なので、目盛りラベルを *表示* する
+                    x: { 
                         type: 'time',
                         time: {
                             unit: 'second',
                             displayFormats: { second: 'HH:mm:ss' }
                         },
-                        ticks: {
-                            display: true // ★ ここで表示
-                        }
+                        ticks: { display: true } 
                     }, 
                     y: { title: { display: true, text: '高さ (m)' } } 
                 },
@@ -235,7 +228,7 @@
         });
 
         const ctxScatter = document.getElementById('scatterChart').getContext('2d');
-        const scatterChart = new Chart(ctxScatter, { // 5. 散布図 (変更なし)
+        const scatterChart = new Chart(ctxScatter, { 
             type: 'scatter',
             data: {
                 datasets: [ 
@@ -307,18 +300,11 @@
                 residualChart.data.datasets.push(dataset);
             }
             
-            // ★ 変更: {x,y} 形式でデータを格納
             const newDataPoint = { x: timestamp, y: residual_val };
             dataset.data.push(newDataPoint);
-            
-            // ★ 変更: MAX_POINTS ではなく、時間で古いデータを削除 (updateループ側で)
-            // if (dataset.data.length > MAX_POINTS) { 
-            //     dataset.data.shift();
-            // }
         }
 
-        // --- 位置メッセージ処理 (変更なし) ---
-        // (基準点を設定するロジックは scatterChart の軸固定に必要)
+        // --- ★ 変更: 位置メッセージ処理 (散布図の軸固定を「削除」) ---
         let basePosition = null; 
         function handlePositionMessage(line) {
             const parts = line.split(',');
@@ -337,32 +323,31 @@
                 basePosition = { lat: lat_dd, lon: lon_dd, h: height };
                 console.log("基準点を設定:", basePosition);
                 
+                // 散布図に基準点をプロット (dataset[1])
                 scatterChart.data.datasets[1].data = [{ x: lon_dd, y: lat_dd }];
                 
-                // 散布図の軸を基準点中心に固定
-                const buffer = 0.0005; 
-                scatterChart.options.scales.x.min = lon_dd - buffer;
-                scatterChart.options.scales.x.max = lon_dd + buffer;
-                scatterChart.options.scales.y.min = lat_dd - buffer;
-                scatterChart.options.scales.y.max = lat_dd + buffer;
+                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                // ★ 変更: 散布図の軸固定 (min/max) ロジックを「削除」
+                // scatterChart.options.scales.x.min = lon_dd - buffer; (削除)
+                // scatterChart.options.scales.x.max = lon_dd + buffer; (削除)
+                // scatterChart.options.scales.y.min = lat_dd - buffer; (削除)
+                // scatterChart.options.scales.y.max = lat_dd + buffer; (削除)
+                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
                 
                 scatterChart.update('none'); 
                 return; 
             }
             
-            // 2. 基準点が設定済みの場合
+            // 2. 基準点が設定済みの場合 (変更なし)
             if (basePosition) {
-                // 3. 時系列グラフ用データを追加
                 posData.t.push(timestamp);
                 posData.lat.push(lat_dd); 
                 posData.lon.push(lon_dd); 
                 posData.h.push(height);   
                 
-                // 4. 散布図用データを追加
                 const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
                 posScatterData.push(scatterPoint);
 
-                // 5. 古いデータを削除
                 if (posData.t.length > MAX_POINTS) {
                     posData.t.shift(); 
                     posData.lat.shift(); 
@@ -393,55 +378,65 @@
             });
         }
         
-        // --- ★ 変更: グラフの更新ループ (X軸のmin/maxを同期) ---
+        // --- ★ 変更: グラフ更新ループ (X軸同期のまま) ---
         setInterval(() => {
-            if (!client.isConnected() || posData.t.length === 0) return;
-            
-            // ★ 1. 同期する時間軸を決定 (posDataを基準)
-            const lastTime = posData.t[posData.t.length - 1].getTime();
-            const timeMin = lastTime - (MAX_POINTS * 1000); // 60秒前
-            const timeMax = lastTime; // 最新時刻
+            if (!client.isConnected()) return;
 
-            // ★ 2. 残差グラフのX軸を設定し、データを更新
-            residualChart.options.scales.x.min = timeMin;
-            residualChart.options.scales.x.max = timeMax;
-            
+            // ★ X軸同期ロジック (右からプロットされる)
+            let timeMin = null;
+            let timeMax = null;
+            if (posData.t.length > 0) {
+                 const lastTime = posData.t[posData.t.length - 1].getTime();
+                 timeMin = lastTime - (MAX_POINTS * 1000); // 60秒前
+                 timeMax = lastTime; // 最新時刻
+            }
+
+            // 1. 残差グラフ
+            if (timeMin) {
+                residualChart.options.scales.x.min = timeMin;
+                residualChart.options.scales.x.max = timeMax;
+            }
             const activeDatasets = [];
-            const activeTimeLimit = new Date().getTime() - 60000; // 1分以内
+            const activeTimeLimit = new Date().getTime() - 60000; 
             for (const [key, dataset] of satDataSets.entries()) {
-                if (dataset.data.length > 0) {
-                    // 古いデータを削除 (効率化)
+                 // 古いデータを削除
+                 if (timeMin) {
                     while(dataset.data.length > 0 && dataset.data[0].x.getTime() < timeMin) {
                         dataset.data.shift();
                     }
-                    if (dataset.data.length > 0 && dataset.data[dataset.data.length - 1].x.getTime() > activeTimeLimit) {
-                         activeDatasets.push(dataset);
-                    }
+                 }
+                if (dataset.data.length > 0 && dataset.data[dataset.data.length - 1].x.getTime() > activeTimeLimit) {
+                     activeDatasets.push(dataset);
                 }
             }
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // ★ 3. 緯度グラフのX軸を設定し、データを更新
-            latChart.options.scales.x.min = timeMin;
-            latChart.options.scales.x.max = timeMax;
-            latChart.data.labels = posData.t; // labels は {x,y} データでは不要
+            // 2. 緯度グラフ
+            if (timeMin) {
+                latChart.options.scales.x.min = timeMin;
+                latChart.options.scales.x.max = timeMax;
+            }
             latChart.data.datasets[0].data = posData.lat.map((val, idx) => ({ x: posData.t[idx], y: val }));
             latChart.update('none');
             
-            // ★ 4. 経度グラフのX軸を設定し、データを更新
-            lonChart.options.scales.x.min = timeMin;
-            lonChart.options.scales.x.max = timeMax;
+            // 3. 経度グラフ
+            if (timeMin) {
+                lonChart.options.scales.x.min = timeMin;
+                lonChart.options.scales.x.max = timeMax;
+            }
             lonChart.data.datasets[0].data = posData.lon.map((val, idx) => ({ x: posData.t[idx], y: val }));
             lonChart.update('none');
             
-            // ★ 5. 高さグラフのX軸を設定し、データを更新
-            heightChart.options.scales.x.min = timeMin;
-            heightChart.options.scales.x.max = timeMax;
+            // 4. 高さグラフ
+            if (timeMin) {
+                heightChart.options.scales.x.min = timeMin;
+                heightChart.options.scales.x.max = timeMax;
+            }
             heightChart.data.datasets[0].data = posData.h.map((val, idx) => ({ x: posData.t[idx], y: val }));
             heightChart.update('none');
 
-            // ★ 6. 散布図 (変更なし)
+            // 5. 散布図 (変更なし)
             scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
             const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
             posScatterData.forEach(p => {
@@ -453,6 +448,8 @@
             scatterChart.data.datasets[4].data = qualityData[5]; // SPS
             scatterChart.data.datasets[5].data = qualityData[4]; // DGPS
             scatterChart.data.datasets[6].data = qualityData[0]; // 無効
+            
+            // ★ 軸固定を削除したので、毎回 update() だけでオートスケールされます
             scatterChart.update('none');
 
         }, 1000); 

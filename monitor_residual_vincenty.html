@@ -103,7 +103,7 @@
         // -------------------------------------------------------------
 
         // --- データ点数 60 (変更なし) ---
-        const MAX_POINTS = 60; 
+        const MAX_POINTS = 300; 
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         const statusDiv = document.getElementById('status');
@@ -343,7 +343,7 @@
                 scatterChart.data.datasets[6].data = [{ x: lon_dd, y: lat_dd }];
                 
                 // ★ 変更: 散布図の軸を「固定」 (SPSの誤差がわかる 0.0005度 バッファ)
-                const buffer = 0.0005; // 約 ±50m の範囲
+                const buffer = 0.00003; // 約 ±50m の範囲
                 scatterChart.options.scales.x.min = lon_dd - buffer;
                 scatterChart.options.scales.x.max = lon_dd + buffer;
                 scatterChart.options.scales.y.min = lat_dd - buffer;

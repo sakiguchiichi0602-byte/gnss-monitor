@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GNSS 総合モニター (Vincenty)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.js"></script>
+
+    <style>
+        /* ページ全体の幅を固定 (変更なし) */
+        body { 
+            font-family: sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center;
+            max-width: 100vw;
+            overflow-x: hidden;
+        }
+        h1 { margin: 10px 0; }
+        
+        /* 接続中バー (変更なし) */
+        #status { 
+            width: 98vw; 
+            padding: 10px; 
+            background-color: #eee; 
+            border-radius: 5px; 
+            font-weight: bold; 
+            box-sizing: border-box; 
+        }
+        #status.error { background-color: #ffdddd; color: #d8000c; }
+        #status.success { background-color: #ddffdd; color: #008000; }
+        
+        #main-container {
+            display: flex;
+            flex-direction: row; 
+            width: 98vw; 
+            height: 80vh; 
+            margin-top: 10px;
+        }
+        
+        /* レイアウト固定 (変更なし) */
+        #left-column {
+            width: 75%; 
+            display: flex;
+            flex-direction: column; 
+            height: 100%;
+            min-width: 0; 
+        }
+        #right-column {
+            width: 25%; 
+            height: 100%;
+            padding-left: 10px;
+            box-sizing: border-box;
+            min-width: 0; 
+        }
+        
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 100%; 
+            min-height: 150px; 
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            overflow: hidden; 
+        }
+        
+        /* 右カラムは散布図のみ (変更なし) */
+        #scatter-container { 
+            height: 100%; 
+            margin-bottom: 0; 
+        }
+        
+        canvas { max-height: 100%; }
+    </style>
+</head>
+<body>
+    <h1>GNSS 総合モニター (残差・距離)</h1>
+    
+    <div id="status">MQTTブローカーに接続中...</div>
+    
+    <div id="main-container">
+        <div id="left-column">
+            <div class="chart-container" style="flex: 1.2;">
+                <canvas id="residualChart"></canvas>
+            </div>
+            <div class="chart-container" style="flex: 1;">
+                <canvas id="distanceChart"></canvas>
+            </div>
+            <div class="chart-container" style="flex: 1; margin-bottom: 0;">
+                <canvas id="heightChart"></canvas>
+            </div>
+        </div>
+        
+        <div id="right-column">
+            <div class="chart-container" id="scatter-container">
+                <canvas id="scatterChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- ★★★★★ 設定項目 (変更なし) ★★★★★ ---
+        const MQTT_HOST = "249e081497cc4102b789e090b4e02268.s1.eu.hivemq.cloud";
+        const MQTT_PORT = 8884;
+        const MQTT_USERNAME = "irie_lab";
+        const MQTT_PASSWORD = "Suya2659";
+        const MQTT_TOPIC_RESIDUALS = "gnss/raspi/sbf-rtk-residuals";
+        const MQTT_TOPIC_POSITION = "gnss/raspi/position-llh";
+        // -------------------------------------------------------------
+
+        // --- データ点数 60 (変更なし) ---
+        const MAX_POINTS = 60; 
+        
+        const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
+        const statusDiv = document.getElementById('status');
+        
+        // --- 色・スタイル・品質定義 (変更なし) ---
+        const satColors = new Map();
+        let colorIndex = 0;
+        const available_colors = ['#E6194B', '#3CB44B', '#4363D8', '#F58231', '#911EB4', '#46F0F0', '#F032E6', '#BCF60C', '#008080', '#E6BEFF', '#9A6324', '#800000', '#000075'];
+        function getSatColor(sat_id) {
+            if (!satColors.has(sat_id)) {
+                satColors.set(sat_id, available_colors[colorIndex % available_colors.length]);
+                colorIndex++;
+            }
+            return satColors.get(sat_id);
+        }
+        function getLineStyle(freq_id) {
+            const id_str = String(freq_id);
+            if (id_str === '2') return [5, 5];
+            if (id_str === '5' || id_str === '7') return [2, 2];
+            return [];
+        }
+        const qualityMap = { 0: "無効", 1: "RTK Fixed (Q=1)", 2: "RTK Float (Q=2)", 3: "SBAS (Q=3)", 4: "DGPS (Q=4)", 5: "SPS (Q=5)" };
+        const qualityColor = { 0: "#999", 1: "#3CB44B", 2: "#E6194B", 3: "#911EB4", 4: "#4363D8", 5: "#F58231" };
+        
+        function updateStatus(message, isError = false) {
+            console.log(message);
+            statusDiv.textContent = message;
+            if (isError) { statusDiv.className = 'error'; }
+            else { statusDiv.className = (message.includes("接続しました")) ? 'success' : ''; }
+        }
+
+        // --- ★ 新規: ヴィンセンティー法 (Vincenty) 関数 ---
+        /**
+         * 2点の緯度経度からVincenty法で距離(m)を計算する
+         * WGS84測地系
+         */
+        function calculateVincentyDistance(lat1, lon1, lat2, lon2) {
+            function toRad(deg) { return deg * Math.PI / 180; }
+
+            const a = 6378137.0; // WGS84 楕円体 長半径
+            const f = 1 / 298.257223563; // WGS84 扁平率
+            const b = (1 - f) * a; // WGS84 楕円体 短半径
+
+            const L = toRad(lon2 - lon1);
+            const U1 = Math.atan((1 - f) * Math.tan(toRad(lat1)));
+            const U2 = Math.atan((1 - f) * Math.tan(toRad(lat2)));
+            const sinU1 = Math.sin(U1), cosU1 = Math.cos(U1);
+            const sinU2 = Math.sin(U2), cosU2 = Math.cos(U2);
+
+            let lambda = L, lambdaP, iterLimit = 100;
+            let cosSqAlpha, sinSigma, cosSigma, cos2SigmaM, sigma;
+
+            do {
+                const sinLambda = Math.sin(lambda), cosLambda = Math.cos(lambda);
+                sinSigma = Math.sqrt(Math.pow(cosU2 * sinLambda, 2) + 
+                                     Math.pow(cosU1 * sinU2 - sinU1 * cosU2 * cosLambda, 2));
+                if (sinSigma === 0) return 0; // 2点が同じ
+
+                cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda;
+                sigma = Math.atan2(sinSigma, cosSigma);
+                const sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma;
+                cosSqAlpha = 1 - Math.pow(sinAlpha, 2);
+                
+                // ★ 2点が赤道上にある場合、cosSqAlphaが0になるのを防ぐ
+                if (cosSqAlpha === 0) {
+                    cos2SigmaM = 0;
+                } else {
+                    cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha;
+                }
+
+                const C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha));
+                lambdaP = lambda;
+                lambda = L + (1 - C) * f * sinAlpha * (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * Math.pow(cos2SigmaM, 2))));
+
+            } while (Math.abs(lambda - lambdaP) > 1e-12 && --iterLimit > 0);
+
+            if (iterLimit === 0) return NaN; // 収束しなかった
+
+            const uSq = cosSqAlpha * (a * a - b * b) / (b * b);
+            const A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+            const B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+
+            const deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * Math.pow(cos2SigmaM, 2)) -
+                             B / 6 * cos2SigmaM * (-3 + 4 * Math.pow(sinSigma, 2)) * (-3 + 4 * Math.pow(cos2SigmaM, 2))));
+
+            const s = b * A * (sigma - deltaSigma);
+            return s; // 距離 (m)
+        }
+        
+        // --- ★ データ保持用の構造 (基準点を復活) ---
+        const satDataSets = new Map(); 
+        let basePosition = null; // ★ 基準点
+        // ★ 変更: dist_m (水平距離), h_abs (絶対高さ)
+        const posData = { t: [], dist_m: [], h_abs: [] };
+        const posScatterData = []; // 散布図 (Lat-Lon) 用
+
+        // --- ★ Chart.js 初期化 (中段を distanceChart に) ---
+        const ctxRes = document.getElementById('residualChart').getContext('2d');
+        const residualChart = new Chart(ctxRes, { // 1. 残差 (変更なし)
+            type: 'line', data: { datasets: [] },
+            options: { responsive: true, maintainAspectRatio: false,
+                scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '残差 (m)' } } },
+                plugins: { title: { display: true, text: 'GPS衛星 疑似距離残差 (リアルタイム)' } }
+            }
+        });
+
+        // --- ★ 新規: 2. 水平距離グラフ ---
+        const ctxDist = document.getElementById('distanceChart').getContext('2d');
+        const distanceChart = new Chart(ctxDist, {
+            type: 'line',
+            data: {
+                labels: [], 
+                datasets: [
+                    { label: '水平距離 (m)', data: [], borderColor: '#911EB4', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                ]
+            },
+            options: { responsive: true, maintainAspectRatio: false,
+                scales: { 
+                    x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
+                    y: { title: { display: true, text: '距離 (m)' } }
+                },
+                plugins: { title: { display: true, text: '時間 - 水平距離 (基準点から)' } }
+            }
+        });
+
+        const ctxHeight = document.getElementById('heightChart').getContext('2d');
+        const heightChart = new Chart(ctxHeight, { // 3. 高さ (変更なし)
+            type: 'line',
+            data: {
+                labels: [], 
+                datasets: [
+                    { label: '高さ (m)', data: [], borderColor: '#F58231', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                ]
+            },
+            options: { responsive: true, maintainAspectRatio: false,
+                scales: { 
+                    x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
+                    y: { title: { display: true, text: '高さ (m)' } } 
+                },
+                plugins: { title: { display: true, text: '時間 - 高さ' } }
+            }
+        });
+
+        const ctxScatter = document.getElementById('scatterChart').getContext('2d');
+        const scatterChart = new Chart(ctxScatter, { // 4. 散布図
+            type: 'scatter',
+            data: {
+                datasets: [ 
+                    // 軌跡 (折れ線)
+                    { label: '軌跡 (Path)', data: [], borderColor: '#aaaaaa', borderWidth: 1, pointRadius: 0, showLine: true, tension: 0.1 },
+                    // ★ 新規: 基準点
+                    { label: '基準点', data: [], backgroundColor: '#0000FF', pointRadius: 6, pointStyle: 'star', showLine: false },
+                    // 品質ごとの点
+                    { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3, showLine: false },
+                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3, showLine: false },
+                    { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3, showLine: false },
+                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3, showLine: false },
+                    { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3, showLine: false }
+                ]
+            },
+            options: { responsive: true, maintainAspectRatio: true, aspectRatio: 1, 
+                scales: { 
+                    x: { title: { display: true, text: '経度 (度)' }, grid: { color: '#ccc' } }, 
+                    y: { title: { display: true, text: '緯度 (度)' }, grid: { color: '#ccc' } } 
+                },
+                plugins: { title: { display: true, text: '水平位置 (Lat vs Lon)' } }
+            }
+        });
+
+        // --- MQTTクライアント初期化 (変更なし) ---
+        const clientID = "gnss_web_monitor_vincenty_" + new Date().getTime();
+        const client = new Paho.Client(MQTT_HOST, MQTT_PORT, clientID); 
+
+        client.onConnectionLost = (responseObject) => {
+            if (responseObject.errorCode !== 0) {
+                updateStatus(`MQTT接続が切れました: ${responseObject.errorMessage}。5秒後に再接続します...`, true);
+                setTimeout(startConnect, 5000);
+            }
+        };
+
+        // --- メッセージ受信 (変更なし) ---
+        client.onMessageArrived = (message) => {
+            try {
+                if (message.destinationName === MQTT_TOPIC_RESIDUALS) {
+                    handleResidualMessage(message.payloadString);
+                }
+                else if (message.destinationName === MQTT_TOPIC_POSITION) {
+                    handlePositionMessage(message.payloadString);
+                }
+            } catch (e) {
+                console.error(`データ解析エラー: ${e}`, message.payloadString);
+            }
+        };
+        
+        // --- 残差メッセージ処理 (変更なし) ---
+        function handleResidualMessage(line) {
+            const parts = line.split(',');
+            if (parts.length < 5) return; 
+            const week = parseInt(parts[0]);
+            const gpst_sec = parseFloat(parts[1]);
+            const utc_ms = GPS_EPOCH_MS + (week * 7 * 24 * 60 * 60 * 1000) + (gpst_sec * 1000);
+            const timestamp = new Date(utc_ms); 
+            const sat_id = parts[2];
+            const freq_id = parts[3];
+            const residual_val = parseFloat(parts[4]);
+            if (isNaN(residual_val)) return; 
+            const key = `${sat_id} (L${freq_id})`;
+            
+            let dataset = satDataSets.get(key);
+            if (!dataset) {
+                dataset = {
+                    label: key, data: [],
+                    borderColor: getSatColor(sat_id), borderDash: getLineStyle(freq_id),
+                    borderWidth: 2, pointRadius: 0, tension: 0.1
+                };
+                satDataSets.set(key, dataset);
+                residualChart.data.datasets.push(dataset);
+            }
+            
+            dataset.data.push({ x: timestamp, y: residual_val });
+            if (dataset.data.length > MAX_POINTS) { 
+                dataset.data.shift();
+            }
+        }
+
+        // --- ★ 位置メッセージの処理関数 (Vincentyで距離計算) ---
+        function handlePositionMessage(line) {
+            const parts = line.split(',');
+            if (parts.length < 5) return;
+            
+            const timestamp = new Date(parseFloat(parts[0]) * 1000);
+            const lat_dd = parseFloat(parts[1]);
+            const lon_dd = parseFloat(parts[2]);
+            const height = parseFloat(parts[3]);
+            const quality = parseInt(parts[4]); 
+            
+            if (isNaN(lat_dd) || quality === 0) return; // 無効なデータはスキップ
+
+            // 1. ★ 変更: 基準点が未設定の場合、設定する
+            if (!basePosition && quality > 0) {
+                basePosition = { lat: lat_dd, lon: lon_dd, h: height };
+                console.log("基準点を設定:", basePosition);
+                
+                // ★ 散布図に基準点をプロット
+                scatterChart.data.datasets[1].data = [{ x: lon_dd, y: lat_dd }];
+                return; // このデータは基準点としてのみ使い、軌跡には含めない
+            }
+            
+            // 2. 基準点が設定済みの場合
+            if (basePosition) {
+                // ★ 新規: Vincenty法で距離を計算
+                const distance = calculateVincentyDistance(basePosition.lat, basePosition.lon, lat_dd, lon_dd);
+                
+                // 3. 時系列グラフ用データを追加
+                posData.t.push(timestamp);
+                posData.dist_m.push(distance); // ★ 水平距離
+                posData.h_abs.push(height);    // ★ 絶対高さ
+                
+                // 4. 散布図用データを追加
+                const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
+                posScatterData.push(scatterPoint);
+
+                // 5. 古いデータを削除
+                if (posData.t.length > MAX_POINTS) {
+                    posData.t.shift(); 
+                    posData.dist_m.shift(); 
+                    posData.h_abs.shift();
+                }
+                if (posScatterData.length > MAX_POINTS) {
+                    posScatterData.shift();
+                }
+            }
+        }
+
+        // --- 接続処理 (変更なし) ---
+        function startConnect() {
+            updateStatus(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
+            client.connect({
+                userName: MQTT_USERNAME,
+                password: MQTT_PASSWORD,
+                useSSL: true, 
+                onSuccess: () => {
+                    updateStatus(`MQTTブローカーに接続しました。トピックの購読を開始します...`, false);
+                    client.subscribe(MQTT_TOPIC_RESIDUALS);
+                    client.subscribe(MQTT_TOPIC_POSITION); 
+                },
+                onFailure: (response) => {
+                    updateStatus(`MQTT接続に失敗: ${response.errorMessage}`, true);
+                }
+            });
+        }
+        
+        // --- ★ グラフの更新ループ (distanceChart を更新) ---
+        setInterval(() => {
+            if (!client.isConnected()) return;
+            
+            // 1. 残差グラフ (変更なし)
+            const activeDatasets = [];
+            const now = new Date();
+            const timeLimit = now.getTime() - 60000; 
+            
+            for (const [key, dataset] of satDataSets.entries()) {
+                if (dataset.data.length > 0) {
+                    if (dataset.data[dataset.data.length - 1].x.getTime() > timeLimit) {
+                         activeDatasets.push(dataset);
+                    }
+                }
+            }
+            residualChart.data.datasets = activeDatasets;
+            residualChart.update('none');
+            
+            // 2. ★ 変更: 水平距離グラフ
+            distanceChart.data.labels = posData.t;
+            distanceChart.data.datasets[0].data = posData.dist_m; 
+            distanceChart.update('none');
+            
+            // 3. ★ 変更: 絶対高さグラフ
+            heightChart.data.labels = posData.t;
+            heightChart.data.datasets[0].data = posData.h_abs; 
+            heightChart.update('none');
+
+            // 4. 散布図 (軌跡 + 点)
+            // 軌跡データ (dataset 0)
+            scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
+            
+            // 品質ごとの点 (datasets 2-6)
+            const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
+            posScatterData.forEach(p => {
+                if (qualityData[p.q]) {
+                    qualityData[p.q].push({x: p.x, y: p.y});
+                } else {
+                    qualityData[0].push({x: p.x, y: p.y});
+                }
+            });
+            scatterChart.data.datasets[2].data = qualityData[1]; // Fixed
+            scatterChart.data.datasets[3].data = qualityData[2]; // Float
+            scatterChart.data.datasets[4].data = qualityData[5]; // SPS
+            scatterChart.data.datasets[5].data = qualityData[4]; // DGPS
+            scatterChart.data.datasets[6].data = qualityData[0]; // 無効
+            
+            // (基準点 (dataset 1) は 1回しか設定しないので、ここでは更新しない)
+            scatterChart.update('none');
+
+        }, 1000); 
+
+        // --- 実行開始 ---
+        startConnect();
+
+    </script>
+</body>
+</html>

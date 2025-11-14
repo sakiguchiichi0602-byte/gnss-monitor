@@ -20,13 +20,23 @@
         }
         h1 { margin: 10px 0; }
         
-        /* ★ 変更: #status 関連のCSSをすべて削除 */
+        /* ★ 変更: #status (接続中バー) のCSSを復活 */
+        #status { 
+            width: 98vw; 
+            padding: 10px; 
+            background-color: #eee; 
+            border-radius: 5px; 
+            font-weight: bold; 
+            box-sizing: border-box; 
+        }
+        #status.error { background-color: #ffdddd; color: #d8000c; }
+        #status.success { background-color: #ddffdd; color: #008000; }
         
         #main-container {
             display: flex;
             flex-direction: row; 
             width: 98vw; 
-            height: 85vh; /* ★ 変更: statusが無くなった分、高さを少し増やす */
+            height: 80vh; /* ★ 変更: 85vh -> 80vh に戻す */
             margin-top: 10px;
         }
         
@@ -56,20 +66,22 @@
             margin-bottom: 10px;
             overflow: hidden; 
         }
-        #scatter-container { height: 50%; margin-bottom: 10px; }
-        #quality-info {
-            height: 48%; 
-            font-size: 1.2em;
-            padding: 15px;
-            box-sizing: border-box;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+        
+        /* ★ 変更: #scatter-container の高さを 100% に */
+        #scatter-container { 
+            height: 100%; 
+            margin-bottom: 0; 
         }
+        
+        /* ★ 変更: #quality-info のCSSを削除 */
+        
         canvas { max-height: 100%; }
     </style>
 </head>
 <body>
     <h1>GNSS 総合モニター (残差・位置)</h1>
+    
+    <div id="status">MQTTブローカーに接続中...</div>
     
     <div id="main-container">
         <div id="left-column">
@@ -88,17 +100,8 @@
             <div class="chart-container" id="scatter-container">
                 <canvas id="scatterChart"></canvas>
             </div>
-            <div id="quality-info">
-                <strong>ステータス:</strong>
-                <p id="current-quality">---</p>
-                <strong>現在位置 (Lat):</strong>
-                <p id="current-lat" style="font-size: 0.8em;">---</p>
-                <strong>現在位置 (Lon):</strong>
-                <p id="current-lon" style="font-size: 0.8em;">---</p>
-                <strong>現在位置 (Hgt):</strong>
-                <p id="current-hgt" style="font-size: 0.8em;">---</p>
+            
             </div>
-        </div>
     </div>
 
     <script>
@@ -116,8 +119,8 @@
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         
-        // ★ 変更: statusDiv を削除
-        // const statusDiv = document.getElementById('status');
+        // ★ 変更: statusDiv を復活
+        const statusDiv = document.getElementById('status');
         
         // --- 色・スタイル・品質定義 (変更なし) ---
         const satColors = new Map();
@@ -139,25 +142,22 @@
         const qualityMap = { 0: "無効", 1: "RTK Fixed (Q=1)", 2: "RTK Float (Q=2)", 3: "SBAS (Q=3)", 4: "DGPS (Q=4)", 5: "SPS (Q=5)" };
         const qualityColor = { 0: "#999", 1: "#3CB44B", 2: "#E6194B", 3: "#911EB4", 4: "#4363D8", 5: "#F58231" };
         
-        // ★ 変更: updateStatus を簡素化
+        // ★ 変更: updateStatus を復活
         function updateStatus(message, isError = false) {
-            console.log(message); // コンソールにはログを残す
-            // (画面への表示は行わない)
+            console.log(message);
+            statusDiv.textContent = message;
+            if (isError) { statusDiv.className = 'error'; }
+            else { statusDiv.className = (message.includes("接続しました")) ? 'success' : ''; }
         }
-
-        // --- ★ 変更: calculate_meters ヘルパー関数を削除 ---
         
-        // --- ★ データ保持用の構造 (絶対値格納) ---
-        const satDataSets = new Map(); // 残差
-        // ★ 変更: basePosition を削除
-        // let basePosition = null; 
-        // ★ 変更: m -> abs (絶対値)
+        // --- データ保持 (変更なし) ---
+        const satDataSets = new Map(); 
         const posData = { t: [], lat: [], lon: [], h: [] };
-        const posScatterData = []; // 散布図 (Lat-Lon) 用
+        const posScatterData = []; 
 
-        // --- ★ 4つのChart.jsインスタンスを初期化 (Y軸スケールを変更) ---
+        // --- Chart.js 初期化 (変更なし) ---
         const ctxRes = document.getElementById('residualChart').getContext('2d');
-        const residualChart = new Chart(ctxRes, { // 残差 (変更なし)
+        const residualChart = new Chart(ctxRes, { 
             type: 'line', data: { datasets: [] },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '残差 (m)' } } },
@@ -166,7 +166,7 @@
         });
 
         const ctxLatLon = document.getElementById('latlonChart').getContext('2d');
-        const latlonChart = new Chart(ctxLatLon, { // 緯度・経度
+        const latlonChart = new Chart(ctxLatLon, { 
             type: 'line',
             data: {
                 labels: [], 
@@ -178,7 +178,6 @@
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
                     x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
-                    // ★ 変更: Y軸を2つ (緯度用・経度用) に分離
                     y_lat: { type: 'linear', position: 'left', title: { display: true, text: '緯度 (度)', color: '#4363D8' } },
                     y_lon: { type: 'linear', position: 'right', title: { display: true, text: '経度 (度)', color: '#3CB44B' }, grid: { drawOnChartArea: false } }
                 },
@@ -187,7 +186,7 @@
         });
 
         const ctxHeight = document.getElementById('heightChart').getContext('2d');
-        const heightChart = new Chart(ctxHeight, { // 高さ
+        const heightChart = new Chart(ctxHeight, { 
             type: 'line',
             data: {
                 labels: [], 
@@ -198,17 +197,17 @@
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
                     x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
-                    y: { title: { display: true, text: '高さ (m)' } } // ★ 変更: "高さ誤差" -> "高さ"
+                    y: { title: { display: true, text: '高さ (m)' } } 
                 },
                 plugins: { title: { display: true, text: '時間 - 高さ' } }
             }
         });
 
         const ctxScatter = document.getElementById('scatterChart').getContext('2d');
-        const scatterChart = new Chart(ctxScatter, { // 散布図
+        const scatterChart = new Chart(ctxScatter, { 
             type: 'scatter',
             data: {
-                datasets: [ // (凡例は変更なし)
+                datasets: [ 
                     { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3 },
                     { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3 },
                     { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3 },
@@ -218,7 +217,6 @@
             },
             options: { responsive: true, maintainAspectRatio: true, aspectRatio: 1, 
                 scales: { 
-                    // ★ 変更: 軸ラベルを絶対値に変更
                     x: { title: { display: true, text: '経度 (度)' }, grid: { color: '#ccc' } }, 
                     y: { title: { display: true, text: '緯度 (度)' }, grid: { color: '#ccc' } } 
                 },
@@ -282,7 +280,7 @@
             }
         }
 
-        // --- ★ 位置メッセージの処理関数 (絶対値を格納) ---
+        // --- ★ 変更: 位置メッセージの処理 (品質表示UIへの書き込みを削除) ---
         function handlePositionMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return;
@@ -291,23 +289,21 @@
             const lat_dd = parseFloat(parts[1]);
             const lon_dd = parseFloat(parts[2]);
             const height = parseFloat(parts[3]);
-            const quality = parseInt(parts[4]); // 1=Fix, 2=Float, 5=SPS
+            const quality = parseInt(parts[4]); 
             
-            if (isNaN(lat_dd) || quality === 0) return; // 無効なデータはスキップ
+            if (isNaN(lat_dd) || quality === 0) return; 
 
-            // ★ 変更: 基準点(basePosition)のロジックをすべて削除
-            
             // 1. 時系列グラフ用データを追加
             posData.t.push(timestamp);
-            posData.lat.push(lat_dd); // ★ 変更: 絶対緯度
-            posData.lon.push(lon_dd); // ★ 変更: 絶対経度
-            posData.h.push(height);   // ★ 変更: 絶対高さ
+            posData.lat.push(lat_dd); 
+            posData.lon.push(lon_dd); 
+            posData.h.push(height);   
             
-            // 2. 散布図用データを追加 (絶対緯度・経度)
-            const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; // ★ 変更: x=lon, y=lat
+            // 2. 散布図用データを追加
+            const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
             posScatterData.push(scatterPoint);
 
-            // 3. 古いデータを削除 (MAX_POINTS = 60)
+            // 3. 古いデータを削除
             if (posData.t.length > MAX_POINTS) {
                 posData.t.shift(); 
                 posData.lat.shift(); 
@@ -318,44 +314,32 @@
                 posScatterData.shift();
             }
             
-            // 4. 品質表示を更新
-            const q_text = qualityMap[quality] || `不明 (${quality})`;
-            const q_color = qualityColor[quality] || "#000";
-            const q_elem = document.getElementById('current-quality');
-            q_elem.textContent = q_text;
-            q_elem.style.color = q_color;
-            q_elem.style.fontWeight = (quality === 1) ? 'bold' : 'normal';
-            
-            // ★ 変更: 基準点 -> 現在の絶対値を表示
-            document.getElementById('current-lat').textContent = `${lat_dd.toFixed(7)} (度)`;
-            document.getElementById('current-lon').textContent = `${lon_dd.toFixed(7)} (度)`;
-            document.getElementById('current-hgt').textContent = `${height.toFixed(3)} (m)`;
+            // 4. ★ 変更: 品質表示UIへの書き込みをすべて削除
         }
 
-        // --- 接続処理 (変更なし) ---
+        // --- ★ 変更: 接続処理 (updateStatusを呼び出すように戻す) ---
         function startConnect() {
-            // ★ 変更: updateStatusをコンソールにのみ表示
-            console.log(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
+            updateStatus(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
             client.connect({
                 userName: MQTT_USERNAME,
                 password: MQTT_PASSWORD,
                 useSSL: true, 
                 onSuccess: () => {
-                    console.log(`MQTTブローカーに接続しました。トピックの購読を開始します...`);
+                    updateStatus(`MQTTブローカーに接続しました。トピックの購読を開始します...`, false);
                     client.subscribe(MQTT_TOPIC_RESIDUALS);
                     client.subscribe(MQTT_TOPIC_POSITION); 
                 },
                 onFailure: (response) => {
-                    console.error(`MQTT接続に失敗: ${response.errorMessage}`);
+                    updateStatus(`MQTT接続に失敗: ${response.errorMessage}`, true);
                 }
             });
         }
         
-        // --- ★ グラフの更新ループ (絶対値で更新) ---
+        // --- グラフ更新ループ (変更なし) ---
         setInterval(() => {
             if (!client.isConnected()) return;
             
-            // 1. 残差グラフの更新 (変更なし)
+            // 1. 残差グラフ
             const activeDatasets = [];
             const now = new Date();
             const timeLimit = now.getTime() - 60000; 
@@ -370,21 +354,20 @@
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // 2. ★ 変更: 緯度・経度(絶対値)グラフの更新
+            // 2. 緯度・経度(絶対値)グラフ
             latlonChart.data.labels = posData.t;
-            latlonChart.data.datasets[0].data = posData.lat; // 緯度
-            latlonChart.data.datasets[1].data = posData.lon; // 経度
+            latlonChart.data.datasets[0].data = posData.lat; 
+            latlonChart.data.datasets[1].data = posData.lon; 
             latlonChart.update('none');
             
-            // 3. ★ 変更: 高さ(絶対値)グラフの更新
+            // 3. 高さ(絶対値)グラフ
             heightChart.data.labels = posData.t;
-            heightChart.data.datasets[0].data = posData.h; // 高さ
+            heightChart.data.datasets[0].data = posData.h; 
             heightChart.update('none');
 
-            // 4. 散布図の更新 (絶対値で更新)
+            // 4. 散布図
             scatterChart.data.datasets.forEach(ds => ds.data = []); 
             posScatterData.forEach(p => {
-                // p.x は lon, p.y は lat
                 if (p.q === 1) scatterChart.data.datasets[0].data.push({x: p.x, y: p.y}); 
                 else if (p.q === 2) scatterChart.data.datasets[1].data.push({x: p.x, y: p.y});
                 else if (p.q === 5) scatterChart.data.datasets[2].data.push({x: p.x, y: p.y});

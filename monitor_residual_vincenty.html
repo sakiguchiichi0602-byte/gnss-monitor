@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GNSS 総合モニター</title>
+    <title>GNSS 総合モニター (Vincenty)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.js"></script>
@@ -55,7 +55,7 @@
             position: relative;
             width: 100%;
             height: 100%; 
-            min-height: 100px; 
+            min-height: 150px; 
             border: 1px solid #ddd;
             border-radius: 5px;
             margin-bottom: 10px;
@@ -69,7 +69,7 @@
     </style>
 </head>
 <body>
-    <h1>GNSS 総合モニター (残差・位置)</h1>
+    <h1>GNSS 総合モニター (残差・距離)</h1>
     <div id="status">MQTTブローカーに接続中...</div>
     
     <div id="main-container">
@@ -78,10 +78,7 @@
                 <canvas id="residualChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1;">
-                <canvas id="latChart"></canvas>
-            </div>
-            <div class="chart-container" style="flex: 1;">
-                <canvas id="lonChart"></canvas>
+                <canvas id="distanceChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1; margin-bottom: 0;">
                 <canvas id="heightChart"></canvas>
@@ -106,7 +103,7 @@
         // -------------------------------------------------------------
 
         // --- データ点数 60 (変更なし) ---
-        const MAX_POINTS = 300; 
+        const MAX_POINTS = 60; 
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         const statusDiv = document.getElementById('status');
@@ -137,13 +134,51 @@
             if (isError) { statusDiv.className = 'error'; }
             else { statusDiv.className = (message.includes("接続しました")) ? 'success' : ''; }
         }
+
+        // --- ★ ヴィンセンティー法 (Vincenty) 関数 (復活) ---
+        function calculateVincentyDistance(lat1, lon1, lat2, lon2) {
+            function toRad(deg) { return deg * Math.PI / 180; }
+            const a = 6378137.0, f = 1 / 298.257223563, b = (1 - f) * a;
+            const L = toRad(lon2 - lon1);
+            const U1 = Math.atan((1 - f) * Math.tan(toRad(lat1)));
+            const U2 = Math.atan((1 - f) * Math.tan(toRad(lat2)));
+            const sinU1 = Math.sin(U1), cosU1 = Math.cos(U1);
+            const sinU2 = Math.sin(U2), cosU2 = Math.cos(U2);
+            let lambda = L, lambdaP, iterLimit = 100;
+            let cosSqAlpha, sinSigma, cosSigma, cos2SigmaM, sigma;
+            do {
+                const sinLambda = Math.sin(lambda), cosLambda = Math.cos(lambda);
+                sinSigma = Math.sqrt(Math.pow(cosU2 * sinLambda, 2) + 
+                                     Math.pow(cosU1 * sinU2 - sinU1 * cosU2 * cosLambda, 2));
+                if (sinSigma === 0) return 0; 
+                cosSigma = sinU1 * sinU2 + cosU1 * cosU2 * cosLambda;
+                sigma = Math.atan2(sinSigma, cosSigma);
+                const sinAlpha = cosU1 * cosU2 * sinLambda / sinSigma;
+                cosSqAlpha = 1 - Math.pow(sinAlpha, 2);
+                if (cosSqAlpha === 0) { cos2SigmaM = 0; }
+                else { cos2SigmaM = cosSigma - 2 * sinU1 * sinU2 / cosSqAlpha; }
+                const C = f / 16 * cosSqAlpha * (4 + f * (4 - 3 * cosSqAlpha));
+                lambdaP = lambda;
+                lambda = L + (1 - C) * f * sinAlpha * (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * Math.pow(cos2SigmaM, 2))));
+            } while (Math.abs(lambda - lambdaP) > 1e-12 && --iterLimit > 0);
+            if (iterLimit === 0) return NaN; 
+            const uSq = cosSqAlpha * (a * a - b * b) / (b * b);
+            const A = 1 + uSq / 16384 * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+            const B = uSq / 1024 * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+            const deltaSigma = B * sinSigma * (cos2SigmaM + B / 4 * (cosSigma * (-1 + 2 * Math.pow(cos2SigmaM, 2)) -
+                             B / 6 * cos2SigmaM * (-3 + 4 * Math.pow(sinSigma, 2)) * (-3 + 4 * Math.pow(cos2SigmaM, 2))));
+            const s = b * A * (sigma - deltaSigma);
+            return s; // 距離 (m)
+        }
         
-        // --- データ保持 (変更なし) ---
+        // --- ★ データ保持 (dist_m と h_abs を使用) ---
         const satDataSets = new Map(); 
-        const posData = { t: [], lat: [], lon: [], h: [] };
+        let basePosition = null; 
+        const posData = { t: [], dist_m: [], h_abs: [] };
         const posScatterData = []; 
 
-        // --- Chart.js 初期化 (X軸同期設定) (変更なし) ---
+        // --- ★ Chart.js 初期化 (3段 + 散布図) ---
+        // X軸同期設定
         const commonXAxisOptions = {
             type: 'time',
             time: {
@@ -155,7 +190,7 @@
         };
         
         const ctxRes = document.getElementById('residualChart').getContext('2d');
-        const residualChart = new Chart(ctxRes, { 
+        const residualChart = new Chart(ctxRes, { // 1. 残差
             type: 'line', data: { datasets: [] },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
@@ -166,44 +201,27 @@
             }
         });
 
-        const ctxLat = document.getElementById('latChart').getContext('2d');
-        const latChart = new Chart(ctxLat, { 
+        // 2. 水平距離
+        const ctxDist = document.getElementById('distanceChart').getContext('2d');
+        const distanceChart = new Chart(ctxDist, {
             type: 'line',
             data: {
                 labels: [], 
                 datasets: [
-                    { label: '緯度 (度)', data: [], borderColor: '#4363D8', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                    { label: '水平距離 (m)', data: [], borderColor: '#911EB4', borderWidth: 2, pointRadius: 0, tension: 0.1 }
                 ]
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
                     x: { ...commonXAxisOptions }, 
-                    y: { title: { display: true, text: '緯度 (度)' } }
+                    y: { title: { display: true, text: '距離 (m)' } }
                 },
-                plugins: { title: { display: true, text: '時間 - 緯度' } }
-            }
-        });
-        
-        const ctxLon = document.getElementById('lonChart').getContext('2d');
-        const lonChart = new Chart(ctxLon, { 
-            type: 'line',
-            data: {
-                labels: [], 
-                datasets: [
-                    { label: '経度 (度)', data: [], borderColor: '#3CB44B', borderWidth: 2, pointRadius: 0, tension: 0.1 }
-                ]
-            },
-            options: { responsive: true, maintainAspectRatio: false,
-                scales: { 
-                    x: { ...commonXAxisOptions }, 
-                    y: { title: { display: true, text: '経度 (度)' } }
-                },
-                plugins: { title: { display: true, text: '時間 - 経度' } }
+                plugins: { title: { display: true, text: '時間 - 水平距離 (基準点から)' } }
             }
         });
 
         const ctxHeight = document.getElementById('heightChart').getContext('2d');
-        const heightChart = new Chart(ctxHeight, { 
+        const heightChart = new Chart(ctxHeight, { // 3. 高さ
             type: 'line',
             data: {
                 labels: [], 
@@ -213,7 +231,7 @@
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
-                    x: { 
+                    x: { // ★ 一番下なのでX軸ラベルを表示
                         type: 'time',
                         time: {
                             unit: 'second',
@@ -228,7 +246,7 @@
         });
 
         const ctxScatter = document.getElementById('scatterChart').getContext('2d');
-        const scatterChart = new Chart(ctxScatter, { 
+        const scatterChart = new Chart(ctxScatter, { // 4. 散布図 (変更なし)
             type: 'scatter',
             data: {
                 datasets: [ 
@@ -251,7 +269,7 @@
         });
 
         // --- MQTTクライアント初期化 (変更なし) ---
-        const clientID = "gnss_web_monitor_combined_" + new Date().getTime();
+        const clientID = "gnss_web_monitor_vincenty_" + new Date().getTime();
         const client = new Paho.Client(MQTT_HOST, MQTT_PORT, clientID); 
 
         client.onConnectionLost = (responseObject) => {
@@ -305,7 +323,6 @@
         }
 
         // --- ★ 変更: 位置メッセージ処理 (散布図の軸固定を「削除」) ---
-        let basePosition = null; 
         function handlePositionMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return;
@@ -326,33 +343,31 @@
                 // 散布図に基準点をプロット (dataset[1])
                 scatterChart.data.datasets[1].data = [{ x: lon_dd, y: lat_dd }];
                 
-                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                // ★ 変更: 散布図の軸固定 (min/max) ロジックを「削除」
-                // scatterChart.options.scales.x.min = lon_dd - buffer; (削除)
-                // scatterChart.options.scales.x.max = lon_dd + buffer; (削除)
-                // scatterChart.options.scales.y.min = lat_dd - buffer; (削除)
-                // scatterChart.options.scales.y.max = lat_dd + buffer; (削除)
-                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                // ★ 変更: 軸固定ロジックは削除
                 
                 scatterChart.update('none'); 
                 return; 
             }
             
-            // 2. 基準点が設定済みの場合 (変更なし)
+            // 2. 基準点が設定済みの場合
             if (basePosition) {
+                // Vincenty法で距離を計算
+                const distance = calculateVincentyDistance(basePosition.lat, basePosition.lon, lat_dd, lon_dd);
+
+                // 3. 時系列グラフ用データを追加
                 posData.t.push(timestamp);
-                posData.lat.push(lat_dd); 
-                posData.lon.push(lon_dd); 
-                posData.h.push(height);   
+                posData.dist_m.push(distance); // ★ 水平距離
+                posData.h_abs.push(height);    // ★ 絶対高さ
                 
+                // 4. 散布図用データを追加
                 const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
                 posScatterData.push(scatterPoint);
 
+                // 5. 古いデータを削除
                 if (posData.t.length > MAX_POINTS) {
                     posData.t.shift(); 
-                    posData.lat.shift(); 
-                    posData.lon.shift(); 
-                    posData.h.shift();
+                    posData.dist_m.shift(); 
+                    posData.h_abs.shift();
                 }
                 if (posScatterData.length > MAX_POINTS) {
                     posScatterData.shift();
@@ -378,11 +393,11 @@
             });
         }
         
-        // --- ★ 変更: グラフ更新ループ (X軸同期のまま) ---
+        // --- ★ 変更: グラフ更新ループ (X軸同期 + 散布図オートスケール) ---
         setInterval(() => {
             if (!client.isConnected()) return;
 
-            // ★ X軸同期ロジック (右からプロットされる)
+            // ★ 1. X軸同期 (右からプロットされる)
             let timeMin = null;
             let timeMax = null;
             if (posData.t.length > 0) {
@@ -391,7 +406,7 @@
                  timeMax = lastTime; // 最新時刻
             }
 
-            // 1. 残差グラフ
+            // 2. 残差グラフ
             if (timeMin) {
                 residualChart.options.scales.x.min = timeMin;
                 residualChart.options.scales.x.max = timeMax;
@@ -399,7 +414,6 @@
             const activeDatasets = [];
             const activeTimeLimit = new Date().getTime() - 60000; 
             for (const [key, dataset] of satDataSets.entries()) {
-                 // 古いデータを削除
                  if (timeMin) {
                     while(dataset.data.length > 0 && dataset.data[0].x.getTime() < timeMin) {
                         dataset.data.shift();
@@ -412,31 +426,55 @@
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // 2. 緯度グラフ
+            // 3. 水平距離グラフ
             if (timeMin) {
-                latChart.options.scales.x.min = timeMin;
-                latChart.options.scales.x.max = timeMax;
+                distanceChart.options.scales.x.min = timeMin;
+                distanceChart.options.scales.x.max = timeMax;
             }
-            latChart.data.datasets[0].data = posData.lat.map((val, idx) => ({ x: posData.t[idx], y: val }));
-            latChart.update('none');
-            
-            // 3. 経度グラフ
-            if (timeMin) {
-                lonChart.options.scales.x.min = timeMin;
-                lonChart.options.scales.x.max = timeMax;
-            }
-            lonChart.data.datasets[0].data = posData.lon.map((val, idx) => ({ x: posData.t[idx], y: val }));
-            lonChart.update('none');
+            distanceChart.data.datasets[0].data = posData.dist_m.map((val, idx) => ({ x: posData.t[idx], y: val }));
+            distanceChart.update('none');
             
             // 4. 高さグラフ
             if (timeMin) {
                 heightChart.options.scales.x.min = timeMin;
                 heightChart.options.scales.x.max = timeMax;
             }
-            heightChart.data.datasets[0].data = posData.h.map((val, idx) => ({ x: posData.t[idx], y: val }));
+            heightChart.data.datasets[0].data = posData.h_abs.map((val, idx) => ({ x: posData.t[idx], y: val }));
             heightChart.update('none');
 
-            // 5. 散布図 (変更なし)
+            // 5. 散布図 (★ 手動オートスケール)
+            if (basePosition) {
+                // 基準点と軌跡データの両方から軸範囲を計算
+                const allPoints = [
+                    ...posScatterData, 
+                    { x: basePosition.lon, y: basePosition.lat, q: -1 } // 基準点を計算に含める
+                ];
+                
+                if (allPoints.length > 0) {
+                    const allX = allPoints.map(p => p.x);
+                    const allY = allPoints.map(p => p.y);
+                    
+                    const minX = Math.min(...allX);
+                    const maxX = Math.max(...allX);
+                    const minY = Math.min(...allY);
+                    const maxY = Math.max(...allY);
+
+                    // 範囲がゼロ（1点しかない）の場合のバッファ
+                    const rangeX = (maxX - minX) || 0.00001; 
+                    const rangeY = (maxY - minY) || 0.00001;
+                    
+                    const paddingX = rangeX * 0.1; // 10%のパディング
+                    const paddingY = rangeY * 0.1;
+
+                    // 新しい軸範囲を設定
+                    scatterChart.options.scales.x.min = minX - paddingX;
+                    scatterChart.options.scales.x.max = maxX + paddingX;
+                    scatterChart.options.scales.y.min = minY - paddingY;
+                    scatterChart.options.scales.y.max = maxY + paddingY;
+                }
+            }
+            
+            // データをプロット (ここは変更なし)
             scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
             const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
             posScatterData.forEach(p => {
@@ -449,7 +487,6 @@
             scatterChart.data.datasets[5].data = qualityData[4]; // DGPS
             scatterChart.data.datasets[6].data = qualityData[0]; // 無効
             
-            // ★ 軸固定を削除したので、毎回 update() だけでオートスケールされます
             scatterChart.update('none');
 
         }, 1000); 

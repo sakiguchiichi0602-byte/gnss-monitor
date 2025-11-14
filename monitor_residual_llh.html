@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale-1.0">
     <title>GNSS 総合モニター</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
@@ -20,7 +20,7 @@
         }
         h1 { margin: 10px 0; }
         
-        /* ★ 変更: #status (接続中バー) のCSSを復活 */
+        /* 接続中バー (変更なし) */
         #status { 
             width: 98vw; 
             padding: 10px; 
@@ -36,7 +36,7 @@
             display: flex;
             flex-direction: row; 
             width: 98vw; 
-            height: 80vh; /* ★ 変更: 85vh -> 80vh に戻す */
+            height: 80vh; 
             margin-top: 10px;
         }
         
@@ -60,20 +60,18 @@
             position: relative;
             width: 100%;
             height: 100%; 
-            min-height: 150px; 
+            min-height: 100px; /* ★ 変更: 4段にするため最小高さを調整 */
             border: 1px solid #ddd;
             border-radius: 5px;
             margin-bottom: 10px;
             overflow: hidden; 
         }
         
-        /* ★ 変更: #scatter-container の高さを 100% に */
+        /* 右カラムは散布図のみ (変更なし) */
         #scatter-container { 
             height: 100%; 
             margin-bottom: 0; 
         }
-        
-        /* ★ 変更: #quality-info のCSSを削除 */
         
         canvas { max-height: 100%; }
     </style>
@@ -89,7 +87,10 @@
                 <canvas id="residualChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1;">
-                <canvas id="latlonChart"></canvas>
+                <canvas id="latChart"></canvas>
+            </div>
+            <div class="chart-container" style="flex: 1;">
+                <canvas id="lonChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1; margin-bottom: 0;">
                 <canvas id="heightChart"></canvas>
@@ -100,8 +101,7 @@
             <div class="chart-container" id="scatter-container">
                 <canvas id="scatterChart"></canvas>
             </div>
-            
-            </div>
+        </div>
     </div>
 
     <script>
@@ -115,11 +115,9 @@
         // -------------------------------------------------------------
 
         // --- データ点数 60 (変更なし) ---
-        const MAX_POINTS = 60; 
+        const MAX_POINTS = 3600; 
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
-        
-        // ★ 変更: statusDiv を復活
         const statusDiv = document.getElementById('status');
         
         // --- 色・スタイル・品質定義 (変更なし) ---
@@ -142,7 +140,6 @@
         const qualityMap = { 0: "無効", 1: "RTK Fixed (Q=1)", 2: "RTK Float (Q=2)", 3: "SBAS (Q=3)", 4: "DGPS (Q=4)", 5: "SPS (Q=5)" };
         const qualityColor = { 0: "#999", 1: "#3CB44B", 2: "#E6194B", 3: "#911EB4", 4: "#4363D8", 5: "#F58231" };
         
-        // ★ 変更: updateStatus を復活
         function updateStatus(message, isError = false) {
             console.log(message);
             statusDiv.textContent = message;
@@ -155,9 +152,9 @@
         const posData = { t: [], lat: [], lon: [], h: [] };
         const posScatterData = []; 
 
-        // --- Chart.js 初期化 (変更なし) ---
+        // --- ★ 変更: Chart.js 初期化 (4つのグラフ) ---
         const ctxRes = document.getElementById('residualChart').getContext('2d');
-        const residualChart = new Chart(ctxRes, { 
+        const residualChart = new Chart(ctxRes, { // 1. 残差 (変更なし)
             type: 'line', data: { datasets: [] },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '残差 (m)' } } },
@@ -165,28 +162,46 @@
             }
         });
 
-        const ctxLatLon = document.getElementById('latlonChart').getContext('2d');
-        const latlonChart = new Chart(ctxLatLon, { 
+        // --- ★ 新規: 2. 緯度グラフ ---
+        const ctxLat = document.getElementById('latChart').getContext('2d');
+        const latChart = new Chart(ctxLat, {
             type: 'line',
             data: {
                 labels: [], 
                 datasets: [
-                    { label: '緯度 (度)', data: [], borderColor: '#4363D8', borderWidth: 2, pointRadius: 0, tension: 0.1, yAxisID: 'y_lat' },
-                    { label: '経度 (度)', data: [], borderColor: '#3CB44B', borderWidth: 2, pointRadius: 0, tension: 0.1, yAxisID: 'y_lon' }
+                    { label: '緯度 (度)', data: [], borderColor: '#4363D8', borderWidth: 2, pointRadius: 0, tension: 0.1 }
                 ]
             },
             options: { responsive: true, maintainAspectRatio: false,
                 scales: { 
                     x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
-                    y_lat: { type: 'linear', position: 'left', title: { display: true, text: '緯度 (度)', color: '#4363D8' } },
-                    y_lon: { type: 'linear', position: 'right', title: { display: true, text: '経度 (度)', color: '#3CB44B' }, grid: { drawOnChartArea: false } }
+                    y: { title: { display: true, text: '緯度 (度)' } }
                 },
-                plugins: { title: { display: true, text: '時間 - 緯度・経度' } }
+                plugins: { title: { display: true, text: '時間 - 緯度' } }
+            }
+        });
+        
+        // --- ★ 新規: 3. 経度グラフ ---
+        const ctxLon = document.getElementById('lonChart').getContext('2d');
+        const lonChart = new Chart(ctxLon, {
+            type: 'line',
+            data: {
+                labels: [], 
+                datasets: [
+                    { label: '経度 (度)', data: [], borderColor: '#3CB44B', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                ]
+            },
+            options: { responsive: true, maintainAspectRatio: false,
+                scales: { 
+                    x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, 
+                    y: { title: { display: true, text: '経度 (度)' } }
+                },
+                plugins: { title: { display: true, text: '時間 - 経度' } }
             }
         });
 
         const ctxHeight = document.getElementById('heightChart').getContext('2d');
-        const heightChart = new Chart(ctxHeight, { 
+        const heightChart = new Chart(ctxHeight, { // 4. 高さ (変更なし)
             type: 'line',
             data: {
                 labels: [], 
@@ -204,15 +219,27 @@
         });
 
         const ctxScatter = document.getElementById('scatterChart').getContext('2d');
-        const scatterChart = new Chart(ctxScatter, { 
+        const scatterChart = new Chart(ctxScatter, { // 5. 散布図
+            // ★ 変更: type: 'scatter' のまま、 showLine: true を追加
             type: 'scatter',
             data: {
                 datasets: [ 
-                    { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3 },
-                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3 },
-                    { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3 },
-                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3 },
-                    { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3 }
+                    // ★ 変更: 軌跡(Path)を表示するデータセットを先頭に追加
+                    { 
+                        label: '軌跡 (Path)', 
+                        data: [], 
+                        borderColor: '#aaaaaa', 
+                        borderWidth: 1, 
+                        pointRadius: 0, 
+                        showLine: true, // ★ これで折れ線になる
+                        tension: 0.1 
+                    },
+                    // 以下は品質ごとの「点」
+                    { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3, showLine: false },
+                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3, showLine: false },
+                    { label: 'SINGLE (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3, showLine: false },
+                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3, showLine: false },
+                    { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3, showLine: false }
                 ]
             },
             options: { responsive: true, maintainAspectRatio: true, aspectRatio: 1, 
@@ -280,7 +307,7 @@
             }
         }
 
-        // --- ★ 変更: 位置メッセージの処理 (品質表示UIへの書き込みを削除) ---
+        // --- 位置メッセージ処理 (変更なし) ---
         function handlePositionMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return;
@@ -313,11 +340,9 @@
             if (posScatterData.length > MAX_POINTS) {
                 posScatterData.shift();
             }
-            
-            // 4. ★ 変更: 品質表示UIへの書き込みをすべて削除
         }
 
-        // --- ★ 変更: 接続処理 (updateStatusを呼び出すように戻す) ---
+        // --- 接続処理 (変更なし) ---
         function startConnect() {
             updateStatus(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
             client.connect({
@@ -335,11 +360,11 @@
             });
         }
         
-        // --- グラフ更新ループ (変更なし) ---
+        // --- ★ 変更: グラフの更新ループ (4つの時系列グラフを更新) ---
         setInterval(() => {
             if (!client.isConnected()) return;
             
-            // 1. 残差グラフ
+            // 1. 残差グラフ (変更なし)
             const activeDatasets = [];
             const now = new Date();
             const timeLimit = now.getTime() - 60000; 
@@ -354,26 +379,40 @@
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // 2. 緯度・経度(絶対値)グラフ
-            latlonChart.data.labels = posData.t;
-            latlonChart.data.datasets[0].data = posData.lat; 
-            latlonChart.data.datasets[1].data = posData.lon; 
-            latlonChart.update('none');
+            // 2. ★ 新規: 緯度(絶対値)グラフ
+            latChart.data.labels = posData.t;
+            latChart.data.datasets[0].data = posData.lat; 
+            latChart.update('none');
             
-            // 3. 高さ(絶対値)グラフ
+            // 3. ★ 新規: 経度(絶対値)グラフ
+            lonChart.data.labels = posData.t;
+            lonChart.data.datasets[0].data = posData.lon; 
+            lonChart.update('none');
+            
+            // 4. 高さ(絶対値)グラフ
             heightChart.data.labels = posData.t;
             heightChart.data.datasets[0].data = posData.h; 
             heightChart.update('none');
 
-            // 4. 散布図
-            scatterChart.data.datasets.forEach(ds => ds.data = []); 
+            // 5. 散布図 (軌跡 + 点)
+            // ★ 変更: 軌跡データセット (index 0) を更新
+            scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
+            
+            // ★ 変更: 品質ごとの点 (index 1-5) を更新
+            const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
             posScatterData.forEach(p => {
-                if (p.q === 1) scatterChart.data.datasets[0].data.push({x: p.x, y: p.y}); 
-                else if (p.q === 2) scatterChart.data.datasets[1].data.push({x: p.x, y: p.y});
-                else if (p.q === 5) scatterChart.data.datasets[2].data.push({x: p.x, y: p.y});
-                else if (p.q === 4) scatterChart.data.datasets[3].data.push({x: p.x, y: p.y}); 
-                else scatterChart.data.datasets[4].data.push({x: p.x, y: p.y}); 
+                if (qualityData[p.q]) {
+                    qualityData[p.q].push({x: p.x, y: p.y});
+                } else {
+                    qualityData[0].push({x: p.x, y: p.y});
+                }
             });
+            scatterChart.data.datasets[1].data = qualityData[1]; // Fixed
+            scatterChart.data.datasets[2].data = qualityData[2]; // Float
+            scatterChart.data.datasets[3].data = qualityData[5]; // SPS
+            scatterChart.data.datasets[4].data = qualityData[4]; // DGPS
+            scatterChart.data.datasets[5].data = qualityData[0]; // 無効
+            
             scatterChart.update('none');
 
         }, 1000); 

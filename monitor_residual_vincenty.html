@@ -228,9 +228,12 @@
             type: 'scatter',
             data: {
                 datasets: [ 
+                    { label: '軌跡 (Path)', data: [], borderColor: '#aaaaaa', borderWidth: 1, pointRadius: 0, showLine: true, tension: 0.1 },
                     { label: '基準点', data: [], backgroundColor: '#0000FF', pointRadius: 6, pointStyle: 'star', showLine: false },
                     { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3, showLine: false },
+                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3, showLine: false },
                     { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3, showLine: false },
+                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3, showLine: false },
                     { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3, showLine: false }
                 ]
             },
@@ -249,4 +252,192 @@
 
         client.onConnectionLost = (responseObject) => {
             if (responseObject.errorCode !== 0) {
-                updateStatus(`MQTT接続が切れました: ${responseObject.errorMessage}。5秒後に再接続します
+                updateStatus(`MQTT接続が切れました: ${responseObject.errorMessage}。5秒後に再接続します...`, true);
+                setTimeout(startConnect, 5000);
+            }
+        };
+
+        // --- メッセージ受信 (変更なし) ---
+        client.onMessageArrived = (message) => {
+            try {
+                if (message.destinationName === MQTT_TOPIC_RESIDUALS) {
+                    handleResidualMessage(message.payloadString);
+                }
+                else if (message.destinationName === MQTT_TOPIC_POSITION) {
+                    handlePositionMessage(message.payloadString);
+                }
+            } catch (e) {
+                console.error(`データ解析エラー: ${e}`, message.payloadString);
+            }
+        };
+        
+        // --- 残差メッセージ処理 (変更なし) ---
+        function handleResidualMessage(line) {
+            const parts = line.split(',');
+            if (parts.length < 5) return; 
+            const week = parseInt(parts[0]);
+            const gpst_sec = parseFloat(parts[1]);
+            const utc_ms = GPS_EPOCH_MS + (week * 7 * 24 * 60 * 60 * 1000) + (gpst_sec * 1000);
+            const timestamp = new Date(utc_ms); 
+            const sat_id = parts[2];
+            const freq_id = parts[3];
+            const residual_val = parseFloat(parts[4]);
+            if (isNaN(residual_val)) return; 
+            const key = `${sat_id} (L${freq_id})`;
+            
+            let dataset = satDataSets.get(key);
+            if (!dataset) {
+                dataset = {
+                    label: key, data: [],
+                    borderColor: getSatColor(sat_id), borderDash: getLineStyle(freq_id),
+                    borderWidth: 2, pointRadius: 0, tension: 0.1
+                };
+                satDataSets.set(key, dataset);
+                residualChart.data.datasets.push(dataset);
+            }
+            
+            dataset.data.push({ x: timestamp, y: residual_val });
+            if (dataset.data.length > MAX_POINTS) { 
+                dataset.data.shift();
+            }
+        }
+
+        // --- ★ 変更: 位置メッセージ処理 (軸スケールを固定) ---
+        function handlePositionMessage(line) {
+            const parts = line.split(',');
+            if (parts.length < 5) return;
+            
+            const timestamp = new Date(parseFloat(parts[0]) * 1000);
+            const lat_dd = parseFloat(parts[1]);
+            const lon_dd = parseFloat(parts[2]);
+            const height = parseFloat(parts[3]);
+            const quality = parseInt(parts[4]); 
+            
+            if (isNaN(lat_dd) || quality === 0) return; 
+
+            // 1. 基準点が未設定の場合、設定する
+            if (!basePosition && quality > 0) {
+                basePosition = { lat: lat_dd, lon: lon_dd, h: height };
+                console.log("基準点を設定:", basePosition);
+                
+                // 散布図に基準点をプロット
+                scatterChart.data.datasets[1].data = [{ x: lon_dd, y: lat_dd }];
+                
+                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                // ★ 新規: 散布図の軸を基準点中心に「固定」する
+                // ★ これにより基準点が中央に表示され、消えなくなります
+                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+                const buffer = 0.0001; // 軸の範囲 (度) (約 +/- 11m)
+                scatterChart.options.scales.x.min = lon_dd - buffer;
+                scatterChart.options.scales.x.max = lon_dd + buffer;
+                scatterChart.options.scales.y.min = lat_dd - buffer;
+                scatterChart.options.scales.y.max = lat_dd + buffer;
+                
+                // ★ 基準点を設定したら、一度グラフを更新して軸を適用
+                scatterChart.update('none'); 
+                
+                return; // このデータは軌跡に含めない
+            }
+            
+            // 2. 基準点が設定済みの場合
+            if (basePosition) {
+                // Vincenty法で距離を計算
+                const distance = calculateVincentyDistance(basePosition.lat, basePosition.lon, lat_dd, lon_dd);
+                
+                // 3. 時系列グラフ用データを追加
+                posData.t.push(timestamp);
+                posData.dist_m.push(distance); // 水平距離
+                posData.h_abs.push(height);    // 絶対高さ
+                
+                // 4. 散布図用データを追加
+                const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
+                posScatterData.push(scatterPoint);
+
+                // 5. 古いデータを削除
+                if (posData.t.length > MAX_POINTS) {
+                    posData.t.shift(); 
+                    posData.dist_m.shift(); 
+                    posData.h_abs.shift();
+                }
+                if (posScatterData.length > MAX_POINTS) {
+                    posScatterData.shift();
+                }
+            }
+        }
+
+        // --- 接続処理 (変更なし) ---
+        function startConnect() {
+            updateStatus(`MQTTブローカー (${MQTT_HOST}:${MQTT_PORT}) に接続中...`);
+            client.connect({
+                userName: MQTT_USERNAME,
+                password: MQTT_PASSWORD,
+                useSSL: true, 
+                onSuccess: () => {
+                    updateStatus(`MQTTブローカーに接続しました。トピックの購読を開始します...`, false);
+                    client.subscribe(MQTT_TOPIC_RESIDUALS);
+                    client.subscribe(MQTT_TOPIC_POSITION); 
+                },
+                onFailure: (response) => {
+                    updateStatus(`MQTT接続に失敗: ${response.errorMessage}`, true);
+                }
+            });
+        }
+        
+        // --- グラフ更新ループ (変更なし) ---
+        setInterval(() => {
+            if (!client.isConnected()) return;
+            
+            // 1. 残差グラフ
+            const activeDatasets = [];
+            const now = new Date();
+            const timeLimit = now.getTime() - 60000; 
+            
+            for (const [key, dataset] of satDataSets.entries()) {
+                if (dataset.data.length > 0) {
+                    if (dataset.data[dataset.data.length - 1].x.getTime() > timeLimit) {
+                         activeDatasets.push(dataset);
+                    }
+                }
+            }
+            residualChart.data.datasets = activeDatasets;
+            residualChart.update('none');
+            
+            // 2. 水平距離グラフ
+            distanceChart.data.labels = posData.t;
+            distanceChart.data.datasets[0].data = posData.dist_m; 
+            distanceChart.update('none');
+            
+            // 3. 絶対高さグラフ
+            heightChart.data.labels = posData.t;
+            heightChart.data.datasets[0].data = posData.h_abs; 
+            heightChart.update('none');
+
+            // 4. 散布図 (軌跡 + 点)
+            scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
+            
+            const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
+            posScatterData.forEach(p => {
+                if (qualityData[p.q]) {
+                    qualityData[p.q].push({x: p.x, y: p.y});
+                } else {
+                    qualityData[0].push({x: p.x, y: p.y});
+                }
+            });
+            scatterChart.data.datasets[2].data = qualityData[1]; // Fixed
+            scatterChart.data.datasets[3].data = qualityData[2]; // Float
+            scatterChart.data.datasets[4].data = qualityData[5]; // SPS
+            scatterChart.data.datasets[5].data = qualityData[4]; // DGPS
+            scatterChart.data.datasets[6].data = qualityData[0]; // 無効
+            
+            // (基準点 (dataset 1) は 1回しか設定しないので、ここでは更新しない)
+            // ★ ただし、軸が固定されたので、常に表示される
+            scatterChart.update('none');
+
+        }, 1000); 
+
+        // --- 実行開始 ---
+        startConnect();
+
+    </script>
+</body>
+</html>

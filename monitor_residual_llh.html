@@ -9,7 +9,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.js"></script>
 
     <style>
-        /* ★ 変更: ページ全体の幅を固定し、横スクロールを禁止 */
+        /* ページ全体の幅を固定し、横スクロールを禁止 (変更なし) */
         body { 
             font-family: sans-serif; 
             display: flex; 
@@ -19,26 +19,29 @@
             overflow-x: hidden;
         }
         h1 { margin: 10px 0; }
-        /* ★ 変更: コンテナの幅を 98vw に設定 */
         #status { width: 98vw; padding: 10px; background-color: #eee; border-radius: 5px; font-weight: bold; box-sizing: border-box; }
         #status.error { background-color: #ffdddd; color: #d8000c; }
         #status.success { background-color: #ddffdd; color: #008000; }
         
         #main-container {
             display: flex;
-            flex-direction: row; /* 横並び */
-            width: 98vw; /* ★ 変更: 95vw -> 98vw */
+            flex-direction: row; 
+            width: 98vw; 
             height: 80vh;
             margin-top: 10px;
         }
+        
+        /* ★ 変更: オーバーフロー対策 (min-width: 0) を追加 */
         #left-column {
-            flex: 3; /* 幅 3/4 */
+            flex: 3; 
             display: flex;
-            flex-direction: column; /* 縦並び */
+            flex-direction: column; 
             height: 100%;
+            min-width: 0; /* ★重要: グラフがコンテナを突き破るのを防ぐ */
         }
+        
         #right-column {
-            flex: 1; /* 幅 1/4 */
+            flex: 1; 
             height: 100%;
             padding-left: 10px;
             box-sizing: border-box;
@@ -46,28 +49,23 @@
         .chart-container {
             position: relative;
             width: 100%;
-            height: 100%; /* 親の高さに合わせる */
-            min-height: 150px; /* 最小高さを確保 */
+            height: 100%; 
+            min-height: 150px; 
             border: 1px solid #ddd;
             border-radius: 5px;
             margin-bottom: 10px;
-            overflow: hidden; /* ★ 追加: コンテナからグラフがはみ出ないように */
+            overflow: hidden; 
         }
-        #scatter-container {
-            height: 50%; /* 右カラムの半分 */
-            margin-bottom: 10px;
-        }
+        #scatter-container { height: 50%; margin-bottom: 10px; }
         #quality-info {
-            height: 48%; /* 右カラムの残り */
+            height: 48%; 
             font-size: 1.2em;
             padding: 15px;
             box-sizing: border-box;
             border: 1px solid #ddd;
             border-radius: 5px;
         }
-        canvas {
-            max-height: 100%;
-        }
+        canvas { max-height: 100%; }
     </style>
 </head>
 <body>
@@ -80,7 +78,7 @@
                 <canvas id="residualChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1;">
-                <canvas id="distanceChart"></canvas>
+                <canvas id="latlonChart"></canvas>
             </div>
             <div class="chart-container" style="flex: 1; margin-bottom: 0;">
                 <canvas id="heightChart"></canvas>
@@ -112,8 +110,10 @@
         const MQTT_TOPIC_POSITION = "gnss/raspi/position-llh";
         // -------------------------------------------------------------
 
-        // --- ★ 変更: データ点数を 300 (約5分) に調整 ---
-        const MAX_POINTS = 300; 
+        // --- ★ 変更: データ点数を 60 (約1分) に調整 ---
+        // (これがグラフのオーバーフローを防ぐ鍵です)
+        const MAX_POINTS = 60; 
+        
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         const statusDiv = document.getElementById('status');
         
@@ -134,7 +134,6 @@
             if (id_str === '5' || id_str === '7') return [2, 2];
             return [];
         }
-        // (1=Fix, 2=Float, 5=Single)
         const qualityMap = { 0: "無効", 1: "RTK Fixed (Q=1)", 2: "RTK Float (Q=2)", 3: "SBAS (Q=3)", 4: "DGPS (Q=4)", 5: "SPS (Q=5)" };
         const qualityColor = { 0: "#999", 1: "#3CB44B", 2: "#E6194B", 3: "#911EB4", 4: "#4363D8", 5: "#F58231" };
         
@@ -156,50 +155,50 @@
             return [delta_x_m, delta_y_m]; // [East, North]
         }
 
-        // --- データ保持用の構造 ---
+        // --- ★ データ保持用の構造 (latlonプロットに戻す) ---
         const satDataSets = new Map(); // 残差
         let basePosition = null; // 基準点
-        // ★ 変更: posData に dist_m (水平距離) を追加
-        const posData = { t: [], h_m: [], dist_m: [] };
+        const posData = { t: [], lat_m: [], lon_m: [], h_m: [] };
         const posScatterData = []; // 散布図 (N-E) 用
 
-        // --- ★ 4つのChart.jsインスタンスを初期化 (latlonChart -> distanceChart) ---
+        // --- ★ 4つのChart.jsインスタンスを初期化 (latlonプロットに戻す) ---
         const ctxRes = document.getElementById('residualChart').getContext('2d');
         const residualChart = new Chart(ctxRes, {
             type: 'line', data: { datasets: [] },
             options: { responsive: true, maintainAspectRatio: false,
-                scales: { x: { type: 'time', time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } } }, y: { title: { display: true, text: '残差 (m)' } } },
+                scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '残差 (m)' } } },
                 plugins: { title: { display: true, text: 'GPS衛星 疑似距離残差 (リアルタイム)' } }
             }
         });
 
-        // --- ★ 変更: 'latlonChart' -> 'distanceChart' ---
-        const ctxDist = document.getElementById('distanceChart').getContext('2d');
-        const distanceChart = new Chart(ctxDist, {
+        // --- ★ 変更: 'distanceChart' -> 'latlonChart' (2データセットに戻す) ---
+        const ctxLatLon = document.getElementById('latlonChart').getContext('2d');
+        const latlonChart = new Chart(ctxLatLon, {
             type: 'line',
             data: {
                 labels: [], // 共通のタイムスタンプ
                 datasets: [
-                    { label: '水平誤差 (m)', data: [], borderColor: '#911EB4', borderWidth: 2, pointRadius: 0, tension: 0.1 }
+                    { label: 'North (m)', data: [], borderColor: '#4363D8', borderWidth: 2, pointRadius: 0, tension: 0.1 },
+                    { label: 'East (m)', data: [], borderColor: '#3CB44B', borderWidth: 2, pointRadius: 0, tension: 0.1 }
                 ]
             },
             options: { responsive: true, maintainAspectRatio: false,
-                scales: { x: { type: 'time', time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } } }, y: { title: { display: true, text: '距離 (m)' } } },
-                plugins: { title: { display: true, text: '時間 - 水平誤差 (基準点から)' } }
+                scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '変位 (m)' } } },
+                plugins: { title: { display: true, text: '時間 - 水平変位 (基準点から)' } }
             }
         });
 
         const ctxHeight = document.getElementById('heightChart').getContext('2d');
-        const heightChart = new Chart(ctxHeight, {
+        const heightChart = new Chart(ctxHeight, { // 高さ (変更なし)
             type: 'line',
             data: {
-                labels: [], // 共通のタイムスタンプ
+                labels: [], 
                 datasets: [
                     { label: '高さ誤差 (m)', data: [], borderColor: '#F58231', borderWidth: 2, pointRadius: 0, tension: 0.1 }
                 ]
             },
             options: { responsive: true, maintainAspectRatio: false,
-                scales: { x: { type: 'time', time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } } }, y: { title: { display: true, text: '高さ (m)' } } },
+                scales: { x: { type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } } }, y: { title: { display: true, text: '高さ (m)' } } },
                 plugins: { title: { display: true, text: '時間 - 高さ誤差 (基準点から)' } }
             }
         });
@@ -250,7 +249,7 @@
             }
         };
         
-        // --- 残差メッセージの処理関数 (変更なし, MAX_POINTS=300 を使用) ---
+        // --- 残差メッセージの処理関数 (MAX_POINTS=60 を使用) ---
         function handleResidualMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return; 
@@ -276,12 +275,12 @@
             }
             
             dataset.data.push({ x: timestamp, y: residual_val });
-            if (dataset.data.length > MAX_POINTS) { // ★ MAX_POINTS (300)
+            if (dataset.data.length > MAX_POINTS) { // ★ MAX_POINTS (60)
                 dataset.data.shift();
             }
         }
 
-        // --- ★ 位置メッセージの処理関数 (dist_m を計算) ---
+        // --- ★ 位置メッセージの処理関数 (lat_m, lon_m を計算) ---
         function handlePositionMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return;
@@ -294,8 +293,8 @@
             
             if (isNaN(lat_dd)) return;
 
-            // 1. 基準点が未設定の場合
-            if (!basePosition && quality > 0) { // Q=5 (SPS) でも基準点として採用
+            // 1. 基準点が未設定の場合 (変更なし)
+            if (!basePosition && quality > 0) {
                 basePosition = { lat: lat_dd, lon: lon_dd, h: height };
                 console.log("基準点を設定:", basePosition);
                 document.getElementById('base-pos').textContent = `${lat_dd.toFixed(7)}, ${lon_dd.toFixed(7)}`;
@@ -306,29 +305,29 @@
             if (basePosition) {
                 const [delta_x_m, delta_y_m] = calculate_meters(basePosition.lat, basePosition.lon, lat_dd, lon_dd);
                 const delta_h_m = height - basePosition.h;
-                // ★ 新規: 水平距離を計算
-                const horiz_dist_m = Math.sqrt(Math.pow(delta_x_m, 2) + Math.pow(delta_y_m, 2));
 
                 // 3. 時系列グラフ用データを追加
                 posData.t.push(timestamp);
-                posData.h_m.push(delta_h_m);   // Up (高さグラフ用)
-                posData.dist_m.push(horiz_dist_m); // 水平距離 (距離グラフ用)
+                posData.lat_m.push(delta_y_m); // North
+                posData.lon_m.push(delta_x_m); // East
+                posData.h_m.push(delta_h_m);   // Up
                 
-                // 4. 散布図用データを追加 (N-E)
+                // 4. 散布図用データを追加 (変更なし)
                 const scatterPoint = { x: delta_x_m, y: delta_y_m, q: quality };
                 posScatterData.push(scatterPoint);
 
-                // 5. 古いデータを削除 (MAX_POINTS = 300)
+                // 5. 古いデータを削除 (MAX_POINTS = 60)
                 if (posData.t.length > MAX_POINTS) {
                     posData.t.shift(); 
+                    posData.lat_m.shift(); 
+                    posData.lon_m.shift(); 
                     posData.h_m.shift();
-                    posData.dist_m.shift();
                 }
                 if (posScatterData.length > MAX_POINTS) {
                     posScatterData.shift();
                 }
                 
-                // 6. 品質表示を更新
+                // 6. 品質表示を更新 (変更なし)
                 const q_text = qualityMap[quality] || `不明 (${quality})`;
                 const q_color = qualityColor[quality] || "#000";
                 const q_elem = document.getElementById('current-quality');
@@ -359,18 +358,17 @@
             });
         }
         
-        // --- ★ グラフの更新ループ (distanceChart を更新) ---
+        // --- ★ グラフの更新ループ (latlonChart を更新) ---
         setInterval(() => {
             if (!client.isConnected()) return;
             
-            // 1. 残差グラフの更新 (アクティブな衛星のみ表示)
+            // 1. 残差グラフの更新 (変更なし)
             const activeDatasets = [];
             const now = new Date();
-            const timeLimit = now.getTime() - 60000; // 1分以内にデータが来たもののみ
+            const timeLimit = now.getTime() - 60000; // 1分以内
             
             for (const [key, dataset] of satDataSets.entries()) {
                 if (dataset.data.length > 0) {
-                    // 最後のデータが古すぎないかチェック
                     if (dataset.data[dataset.data.length - 1].x.getTime() > timeLimit) {
                          activeDatasets.push(dataset);
                     }
@@ -379,24 +377,25 @@
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // 2. ★ 変更: 水平誤差グラフの更新
-            distanceChart.data.labels = posData.t;
-            distanceChart.data.datasets[0].data = posData.dist_m; // 水平距離
-            distanceChart.update('none');
+            // 2. ★ 変更: 緯度・経度変位グラフの更新
+            latlonChart.data.labels = posData.t;
+            latlonChart.data.datasets[0].data = posData.lat_m; // North
+            latlonChart.data.datasets[1].data = posData.lon_m; // East
+            latlonChart.update('none');
             
-            // 3. 高さグラフの更新
+            // 3. 高さグラフの更新 (変更なし)
             heightChart.data.labels = posData.t;
             heightChart.data.datasets[0].data = posData.h_m; // Up
             heightChart.update('none');
 
-            // 4. 散布図の更新 (品質ごとに振り分け)
-            scatterChart.data.datasets.forEach(ds => ds.data = []); // リセット
+            // 4. 散布図の更新 (変更なし)
+            scatterChart.data.datasets.forEach(ds => ds.data = []); 
             posScatterData.forEach(p => {
-                if (p.q === 1) scatterChart.data.datasets[0].data.push({x: p.x, y: p.y}); // Fixed
-                else if (p.q === 2) scatterChart.data.datasets[1].data.push({x: p.x, y: p.y}); // Float
-                else if (p.q === 5) scatterChart.data.datasets[2].data.push({x: p.x, y: p.y}); // SPS
-                else if (p.q === 4) scatterChart.data.datasets[3].data.push({x: p.x, y: p.y}); // DGPS
-                else scatterChart.data.datasets[4].data.push({x: p.x, y: p.y}); // 無効
+                if (p.q === 1) scatterChart.data.datasets[0].data.push({x: p.x, y: p.y}); 
+                else if (p.q === 2) scatterChart.data.datasets[1].data.push({x: p.x, y: p.y});
+                else if (p.q === 5) scatterChart.data.datasets[2].data.push({x: p.x, y: p.y});
+                else if (p.q === 4) scatterChart.data.datasets[3].data.push({x: p.x, y: p.y}); 
+                else scatterChart.data.datasets[4].data.push({x: p.x, y: p.y}); 
             });
             scatterChart.update('none');
 

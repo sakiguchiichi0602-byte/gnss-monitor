@@ -103,7 +103,7 @@
         // -------------------------------------------------------------
 
         // --- データ点数 60 (変更なし) ---
-        const MAX_POINTS = 300; 
+        const MAX_POINTS = 60; 
         
         const GPS_EPOCH_MS = new Date('1980-01-06T00:00:00Z').getTime();
         const statusDiv = document.getElementById('status');
@@ -244,17 +244,18 @@
         });
 
         const ctxScatter = document.getElementById('scatterChart').getContext('2d');
-        const scatterChart = new Chart(ctxScatter, { // 4. 散布図 (変更なし)
+        const scatterChart = new Chart(ctxScatter, { // 4. 散布図
             type: 'scatter',
             data: {
+                // ★ 変更: 「基準点」を配列の最後に移動
                 datasets: [ 
-                    { label: '軌跡 (Path)', data: [], borderColor: '#aaaaaa', borderWidth: 1, pointRadius: 0, showLine: true, tension: 0.1 },
-                    { label: '基準点', data: [], backgroundColor: '#0000FF', pointRadius: 6, pointStyle: 'star', showLine: false },
-                    { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3, showLine: false },
-                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3, showLine: false },
-                    { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3, showLine: false },
-                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3, showLine: false },
-                    { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3, showLine: false }
+                    { label: '軌跡 (Path)', data: [], borderColor: '#aaaaaa', borderWidth: 1, pointRadius: 0, showLine: true, tension: 0.1 }, // 0
+                    { label: 'RTK Fixed (Q=1)', data: [], backgroundColor: qualityColor[1], pointRadius: 3, showLine: false }, // 1
+                    { label: 'RTK Float (Q=2)', data: [], backgroundColor: qualityColor[2], pointRadius: 3, showLine: false }, // 2
+                    { label: 'SPS (Q=5)', data: [], backgroundColor: qualityColor[5], pointRadius: 3, showLine: false }, // 3
+                    { label: 'DGPS (Q=4)', data: [], backgroundColor: qualityColor[4], pointRadius: 3, showLine: false }, // 4
+                    { label: '無効 (Q=0)', data: [], backgroundColor: qualityColor[0], pointRadius: 3, showLine: false }, // 5
+                    { label: '基準点', data: [], backgroundColor: '#0000FF', pointRadius: 6, pointStyle: 'star', showLine: false }  // 6 (一番上)
                 ]
             },
             options: { responsive: true, maintainAspectRatio: true, aspectRatio: 1, 
@@ -320,7 +321,7 @@
             dataset.data.push(newDataPoint);
         }
 
-        // --- ★ 変更: 位置メッセージ処理 (散布図の軸を「固定」) ---
+        // --- ★ 変更: 位置メッセージ処理 (軸固定 + 基準点インデックス変更) ---
         function handlePositionMessage(line) {
             const parts = line.split(',');
             if (parts.length < 5) return;
@@ -338,14 +339,11 @@
                 basePosition = { lat: lat_dd, lon: lon_dd, h: height };
                 console.log("基準点を設定:", basePosition);
                 
-                // 散布図に基準点をプロット (dataset[1])
-                scatterChart.data.datasets[1].data = [{ x: lon_dd, y: lat_dd }];
+                // ★ 変更: 散布図に基準点をプロット (dataset[6])
+                scatterChart.data.datasets[6].data = [{ x: lon_dd, y: lat_dd }];
                 
-                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
                 // ★ 変更: 散布図の軸を「固定」 (SPSの誤差がわかる 0.0005度 バッファ)
-                // ★ 0.0005度 は緯度経度とも約50mに相当します
-                // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-                const buffer = 0.00003; // 約 ±50m の範囲
+                const buffer = 0.0005; // 約 ±50m の範囲
                 scatterChart.options.scales.x.min = lon_dd - buffer;
                 scatterChart.options.scales.x.max = lon_dd + buffer;
                 scatterChart.options.scales.y.min = lat_dd - buffer;
@@ -355,21 +353,17 @@
                 return; 
             }
             
-            // 2. 基準点が設定済みの場合
+            // 2. 基準点が設定済みの場合 (変更なし)
             if (basePosition) {
-                // Vincenty法で距離を計算
                 const distance = calculateVincentyDistance(basePosition.lat, basePosition.lon, lat_dd, lon_dd);
 
-                // 3. 時系列グラフ用データを追加
                 posData.t.push(timestamp);
                 posData.dist_m.push(distance); // 水平距離
                 posData.h_abs.push(height);    // 絶対高さ
                 
-                // 4. 散布図用データを追加
                 const scatterPoint = { x: lon_dd, y: lat_dd, q: quality }; 
                 posScatterData.push(scatterPoint);
 
-                // 5. 古いデータを削除
                 if (posData.t.length > MAX_POINTS) {
                     posData.t.shift(); 
                     posData.dist_m.shift(); 
@@ -399,20 +393,20 @@
             });
         }
         
-        // --- ★ 変更: グラフ更新ループ (X軸同期) ---
+        // --- ★ 変更: グラフ更新ループ (X軸同期 + 散布図インデックス変更) ---
         setInterval(() => {
             if (!client.isConnected()) return;
 
-            // ★ 1. X軸同期 (右からプロットされる)
+            // 1. X軸同期 (右からプロットされる) (変更なし)
             let timeMin = null;
             let timeMax = null;
             if (posData.t.length > 0) {
                  const lastTime = posData.t[posData.t.length - 1].getTime();
-                 timeMin = lastTime - (MAX_POINTS * 1000); // 60秒前
-                 timeMax = lastTime; // 最新時刻
+                 timeMin = lastTime - (MAX_POINTS * 1000); 
+                 timeMax = lastTime; 
             }
 
-            // 2. 残差グラフ
+            // 2. 残差グラフ (変更なし)
             if (timeMin) {
                 residualChart.options.scales.x.min = timeMin;
                 residualChart.options.scales.x.max = timeMax;
@@ -432,7 +426,7 @@
             residualChart.data.datasets = activeDatasets;
             residualChart.update('none');
             
-            // 3. 水平距離グラフ
+            // 3. 水平距離グラフ (変更なし)
             if (timeMin) {
                 distanceChart.options.scales.x.min = timeMin;
                 distanceChart.options.scales.x.max = timeMax;
@@ -440,7 +434,7 @@
             distanceChart.data.datasets[0].data = posData.dist_m.map((val, idx) => ({ x: posData.t[idx], y: val }));
             distanceChart.update('none');
             
-            // 4. 高さグラフ
+            // 4. 高さグラフ (変更なし)
             if (timeMin) {
                 heightChart.options.scales.x.min = timeMin;
                 heightChart.options.scales.x.max = timeMax;
@@ -448,21 +442,23 @@
             heightChart.data.datasets[0].data = posData.h_abs.map((val, idx) => ({ x: posData.t[idx], y: val }));
             heightChart.update('none');
 
-            // 5. 散布図 (変更なし)
+            // 5. 散布図
+            // 軌跡 (dataset 0)
             scatterChart.data.datasets[0].data = posScatterData.map(p => ({x: p.x, y: p.y}));
+            
+            // ★ 変更: 品質ごとの点 (datasets 1-5)
             const qualityData = { 1: [], 2: [], 5: [], 4: [], 0: [] };
             posScatterData.forEach(p => {
                 const q = p.q || 0;
                 if (qualityData[q]) qualityData[q].push({x: p.x, y: p.y});
             });
-            // (基準点 (dataset 1) は 1回しか設定しない)
-            scatterChart.data.datasets[2].data = qualityData[1]; // Fixed
-            scatterChart.data.datasets[3].data = qualityData[2]; // Float
-            scatterChart.data.datasets[4].data = qualityData[5]; // SPS
-            scatterChart.data.datasets[5].data = qualityData[4]; // DGPS
-            scatterChart.data.datasets[6].data = qualityData[0]; // 無効
+            scatterChart.data.datasets[1].data = qualityData[1]; // Fixed
+            scatterChart.data.datasets[2].data = qualityData[2]; // Float
+            scatterChart.data.datasets[3].data = qualityData[5]; // SPS
+            scatterChart.data.datasets[4].data = qualityData[4]; // DGPS
+            scatterChart.data.datasets[5].data = qualityData[0]; // 無効
             
-            // ★ 軸が固定されたので、update() だけでOK
+            // (基準点 (dataset 6) は 1回しか設定しない)
             scatterChart.update('none');
 
         }, 1000); 
@@ -471,5 +467,7 @@
         startConnect();
 
     </script>
+</body>
+</html>
 </body>
 </html>
